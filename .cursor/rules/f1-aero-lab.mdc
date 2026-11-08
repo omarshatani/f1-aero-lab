@@ -1,0 +1,20 @@
+---
+description: Core architecture, FIA 2026 coordinate system, and real-time 3D/CFD invariants for F1 2026 Aero Development & CFD Lab
+globs:
+alwaysApply: true
+---
+
+# F1 2026 Aero Lab — Cursor Context Rule
+
+Consult `AGENTS.md` for the full state-of-the-art overview, `docs/ARCHITECTURE.md` for 3D FFD & GLB segmentation details, and `docs/CFD_AND_REGULATIONS.md` for FIA Issue 8 boxes & CFD equations.
+
+## Essential Contracts
+
+- **Coordinate Frame (`src/regulations/fia2026.ts`):**
+  - World `X` (m) = Lateral (`+X` right, `0` centerline) ↔ `Y_FIA` (mm).
+  - World `Y` (m) = Height above rolling road (`0` tire contact) ↔ `Z_FIA` (`Y = +0.0308 m` is `Z_FIA = 0 mm`).
+  - World `Z` (m) = Longitudinal (`-Z` nose, `+Z` rear wing, flow `-Z -> +Z`; axles at `Z = -1.70 m` and `Z = +1.70 m`) ↔ `X_F` (`0..3400 mm` wheelbase).
+  - Always convert via `fiaMmToWorld()` / `worldToFiaMm()`.
+- **Real-Time Hot Paths:** Keep `PartFFDController.deform()` (`src/geometry/ffdDeformer.ts`) allocation-free using typed arrays (`< 10 ms`) and `runCFDSimulation()` (`src/cfd/CFDSolver.ts`) `< 25 ms`.
+- **Keybindings:** `WASD` + `Arrow` keys + `Q`/`E` + `Shift` are reserved for smooth 3D camera navigation in `SceneManager.ts`. Sculpt gizmos use `G` (translate) and `R` (rotate) in `HudController.ts`.
+- **Build Gate:** Run `npm run build` (`tsc && vite build`) after edits; `noUnusedLocals` and `noUnusedParameters` are strictly enforced.

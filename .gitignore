@@ -1,0 +1,32 @@
+# Dependencies & Build Outputs
+node_modules/
+dist/
+dist-ssr/
+*.local
+
+# Logs & OS / Editor Artifacts
+logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+pnpm-debug.log*
+.DS_Store
+Thumbs.db
+.env
+.env.*
+!.env.example
+
+# IDE / Editor folders (keep shared AI rules tracked)
+.vscode/*
+!.vscode/extensions.json
+.idea/
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.sw?
+
+# Duplicate unpacked GLTF/BIN of f1_2026_concept_polygon_model.glb (~38.6 MB)
+# The runtime loads /f1_2026_concept_polygon_model.glb directly; keep license.txt tracked.
+public/f1_2026_concept_polygon_model/scene.bin
+public/f1_2026_concept_polygon_model/scene.gltf

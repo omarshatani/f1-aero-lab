@@ -1,0 +1,11 @@
+Model Information:
+* title:	F1 2026 concept (polygon model)
+* source:	https://sketchfab.com/3d-models/f1-2026-concept-polygon-model-ea3bde709b1e4dc9b0ec8557d106ed42
+* author:	Qvist_designs (https://sketchfab.com/Qvist_Designs)
+
+Model License:
+* license type:	CC-BY-4.0 (http://creativecommons.org/licenses/by/4.0/)
+* requirements:	Author must be credited. Commercial use is allowed.
+
+If you use this 3D model in your project be sure to copy paste this credit wherever you share it:
+This work is based on "F1 2026 concept (polygon model)" (https://sketchfab.com/3d-models/f1-2026-concept-polygon-model-ea3bde709b1e4dc9b0ec8557d106ed42) by Qvist_designs (https://sketchfab.com/Qvist_Designs) licensed under CC-BY-4.0 (http://creativecommons.org/licenses/by/4.0/)

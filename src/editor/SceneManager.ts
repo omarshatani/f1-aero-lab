@@ -9,7 +9,7 @@ import {
 import { buildPartGeometry } from '../geometry/splineSurface';
 import { checkPartLegality, PART_ORDER } from '../regulations/fia2026';
 import { CarProjectStore, MeshCFDData } from '../state/CarProjectStore';
-import { ActiveAeroMode, CarModelId, PartId, Vec3 } from '../types/aero';
+import { ActiveAeroMode, AeroPartData, CarModelId, PartId, Vec3 } from '../types/aero';
 import { LegalityVisualizer } from './LegalityVisualizer';
 import { PartSculptor } from './PartSculptor';
 
@@ -24,16 +24,24 @@ export type CameraPreset =
 type CameraMoveAction = 'forward' | 'backward' | 'left' | 'right' | 'up' | 'down';
 
 function computeGridSignature(
-  grid: Vec3[][],
+  part: AeroPartData,
   clamp: boolean,
   aeroMode: ActiveAeroMode
 ): string {
+  const grid = part.grid;
   let s = `${clamp ? 1 : 0}:${aeroMode}:`;
   for (let u = 0; u < grid.length; u++) {
     const col = grid[u];
     for (let v = 0; v < col.length; v++) {
       const p = col[v];
       s += `${p.x.toFixed(4)},${p.y.toFixed(4)},${p.z.toFixed(4)};`;
+    }
+  }
+  if (part.proceduralElements && part.proceduralElements.length > 0) {
+    s += '|proc:';
+    for (let i = 0; i < part.proceduralElements.length; i++) {
+      const el = part.proceduralElements[i];
+      s += `${el.id},${el.enabled ? 1 : 0},${el.pitchDeg.toFixed(2)},${el.scale.toFixed(3)},${el.count};`;
     }
   }
   return s;
@@ -272,6 +280,7 @@ export class SceneManager {
     for (const wg of car.wheelGroups) {
       this.carAssembly.add(wg);
     }
+    this.activeLoadedCar.applyWheelStance?.(this.store.wheelStance);
 
     // Bind each PartId's THREE.Mesh directly to its welded PartFFDController BufferGeometry
     this.lastPartSignatures.clear();
@@ -340,6 +349,7 @@ export class SceneManager {
     const ghostStatic = !isCfd && this.store.ghostOtherParts;
     if (this.activeLoadedCar) {
       this.activeLoadedCar.setGhostMode(ghostStatic);
+      this.activeLoadedCar.applyWheelStance?.(this.store.wheelStance);
     } else {
       this.fallbackChassis.setGhostMode(ghostStatic);
     }
@@ -360,20 +370,21 @@ export class SceneManager {
     }
   }
 
-  private deformSinglePart(partId: PartId, force: boolean): void {
+  private deformSinglePart(partId: PartId, force = false): void {
     const part = this.store.parts[partId];
     // Visually show X-Mode flap deflection in Wind Tunnel CFD mode; keep CAD datum Z-Mode in Sculpt Studio!
     const visualAeroMode: ActiveAeroMode =
       this.store.appMode === 'cfd' ? this.store.tunnelSettings.activeAeroMode : 'z_mode';
 
     if (this.activeLoadedCar) {
-      const sig = computeGridSignature(part.grid, this.store.clampToFiaBox, visualAeroMode);
+      const sig = computeGridSignature(part, this.store.clampToFiaBox, visualAeroMode);
       if (!force && this.lastPartSignatures.get(partId) === sig) {
         return;
       }
       this.lastPartSignatures.set(partId, sig);
 
       const ctrl = this.activeLoadedCar.partControllers[partId];
+      ctrl.syncProceduralGeometry?.(part);
       ctrl.applyDeformation(
         part.grid,
         part.legalityBoxes,
@@ -438,9 +449,13 @@ export class SceneManager {
     > = {
       front_wing: { cam: [1.55, 0.72, -3.65], look: [0.35, 0.20, -2.50] },
       nosecone: { cam: [1.45, 0.85, -3.15], look: [0.05, 0.34, -2.15] },
+      front_suspension: { cam: [1.65, 0.72, -2.45], look: [0.42, 0.35, -1.65] },
+      monocoque: { cam: [1.75, 1.05, -1.55], look: [0.15, 0.55, -0.55] },
       floor_boards: { cam: [1.65, 0.58, -1.45], look: [0.68, 0.22, -0.62] },
       floor: { cam: [1.85, -0.48, -0.75], look: [0.25, 0.08, 0.05] },
       sidepods: { cam: [2.05, 0.88, -1.25], look: [0.42, 0.36, 0.25] },
+      engine_cover: { cam: [2.15, 1.25, 0.45], look: [0.12, 0.68, 0.65] },
+      rear_suspension: { cam: [1.70, 0.72, 2.55], look: [0.35, 0.36, 1.65] },
       diffuser: { cam: [1.48, 0.44, 3.15], look: [0.20, 0.16, 1.65] },
       rear_wing: { cam: [1.50, 1.18, 3.35], look: [0.20, 0.80, 2.20] },
     };

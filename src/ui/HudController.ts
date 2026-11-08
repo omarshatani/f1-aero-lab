@@ -4,10 +4,12 @@ import { PART_ORDER, signedMarginInUnion, worldToFiaMm } from '../regulations/fi
 import { CarProjectStore } from '../state/CarProjectStore';
 import {
   ActiveAeroMode,
+  PartCategory,
   PartId,
   SculptSelectMode,
   StreamlineColorMode,
   SurfaceVizMode,
+  WheelStanceSettings,
 } from '../types/aero';
 
 function fmtDelta(val: number, base: number, digits = 2, invertGood = false): string {
@@ -21,12 +23,45 @@ function fmtDelta(val: number, base: number, digits = 2, invertGood = false): st
   return `<span class="${cls}">${sign}${diff.toFixed(digits)}</span>`;
 }
 
+function fmtSigned(val: number, digits = 0, unit = ''): string {
+  const s = val > 0 ? '+' : '';
+  return `${s}${val.toFixed(digits)}${unit}`;
+}
+
+const PART_SHORTCUT_KEYS = ['1', '2', '3', '4', '5', '6', '7', '8', '9', '0', '-'];
+
+interface StanceSliderDef {
+  key: keyof WheelStanceSettings;
+  label: string;
+  unit: string;
+  min: number;
+  max: number;
+  step: number;
+  digits: number;
+}
+
+const STANCE_SLIDER_DEFS: StanceSliderDef[] = [
+  { key: 'frontTrackOffsetMm', label: 'Front Track Offset', unit: ' mm', min: -40, max: 40, step: 1, digits: 0 },
+  { key: 'rearTrackOffsetMm', label: 'Rear Track Offset', unit: ' mm', min: -40, max: 40, step: 1, digits: 0 },
+  { key: 'frontCamberDeg', label: 'Front Camber', unit: '°', min: -4.5, max: 0, step: 0.1, digits: 1 },
+  { key: 'rearCamberDeg', label: 'Rear Camber', unit: '°', min: -3.5, max: 0, step: 0.1, digits: 1 },
+  { key: 'frontToeDeg', label: 'Front Toe-In/Out', unit: '°', min: -1.5, max: 1.5, step: 0.05, digits: 2 },
+  { key: 'rimCoverDishMm', label: 'Wheel Rim Cover Dish', unit: ' mm', min: -25, max: 25, step: 1, digits: 0 },
+];
+
 export class HudController {
   private topbarEl!: HTMLElement;
   private loadingBannerEl!: HTMLElement;
   private leftSculptContainer!: HTMLElement;
   private leftCfdContainer!: HTMLElement;
   private partListEl!: HTMLElement;
+  private subzoneListEl!: HTMLElement;
+  private subzoneDescEl!: HTMLElement;
+  private paramSlidersBoxEl!: HTMLElement;
+  private procElementsBoxEl!: HTMLElement;
+  private wheelStanceBoxEl!: HTMLElement;
+  private wheelStanceSectionEl!: HTMLElement;
+  private stanceToggleBtnEl!: HTMLButtonElement;
   private sculptInfoEl!: HTMLElement;
   private rightTelemetryEl!: HTMLElement;
   private legendEl!: HTMLElement;
@@ -51,6 +86,11 @@ export class HudController {
   private sliceToggleCheckbox!: HTMLInputElement;
   private streamToggleCheckbox!: HTMLInputElement;
 
+  private renderedParamPartId: PartId | null = null;
+  private renderedProcPartId: PartId | null = null;
+  private stanceExpanded = false;
+  private lastAutoStancePartId: PartId | null = null;
+
   private currentRake: RakePreset = 'full_car';
   private currentStreamColor: StreamlineColorMode = 'velocity';
 
@@ -72,26 +112,68 @@ export class HudController {
       <div class="loading-overlay" id="hud-loading" style="display:none;"></div>
 
       <aside class="side-panel left-panel">
-        <div id="left-sculpt-view" style="display:flex;flex-direction:column;gap:11px;">
+        <div id="left-sculpt-view" style="display:flex;flex-direction:column;gap:10px;">
           <div>
             <div class="section-title">
-              <span>1. 2026 FIA Components (Art. 3)</span>
+              <span>1. 2026 FIA Components (11 Parts)</span>
               <button class="btn btn-sm" id="btn-focus-part" title="Shortcut: F">Focus Cam</button>
             </div>
-            <div class="part-list" id="part-list"></div>
+            <div class="cat-tabs" id="cat-filter-btns">
+              <button class="btn btn-sm active" data-cat="all">All (11)</button>
+              <button class="btn btn-sm" data-cat="aero">Aero (7)</button>
+              <button class="btn btn-sm" data-cat="body">Body (2)</button>
+              <button class="btn btn-sm" data-cat="suspension">Susp (2)</button>
+            </div>
+            <div class="part-list part-grid-2" id="part-list"></div>
           </div>
 
           <div>
             <div class="section-title">
-              <span>2. 3D FFD Sculpt & Bend</span>
+              <span>2. Component Sub-Zones</span>
               <button class="btn btn-sm" id="btn-reset-part">Reset Part</button>
             </div>
             <div class="control-group">
+              <div class="subzone-chips" id="subzone-list"></div>
+              <div class="subzone-desc" id="subzone-desc"></div>
+            </div>
+          </div>
+
+          <div>
+            <div class="section-title">
+              <span>3. Parametric Macro Shaping</span>
+            </div>
+            <div class="control-group" id="param-sliders-box"></div>
+          </div>
+
+          <div>
+            <div class="section-title">
+              <span>4. Procedural Aero Appendages</span>
+            </div>
+            <div class="control-group" id="proc-elements-box"></div>
+          </div>
+
+          <div id="wheel-stance-section">
+            <div class="section-title">
+              <span>5. 4-Wheel & Axle Stance</span>
+              <div style="display:flex;gap:4px;">
+                <button class="btn btn-sm" id="btn-reset-stance">Reset Stance</button>
+                <button class="btn btn-sm" id="btn-toggle-stance">Expand</button>
+              </div>
+            </div>
+            <div class="control-group stance-grid" id="wheel-stance-box" style="display:none;"></div>
+          </div>
+
+          <div>
+            <div class="section-title">
+              <span>6. 3D FFD Lattice & Gizmo</span>
+            </div>
+            <div class="control-group">
               <div style="font-size:11px;color:var(--text-muted);">Selection Target</div>
-              <div class="seg-grid-2" id="select-mode-btns">
+              <div class="seg-grid-5" id="select-mode-btns">
                 <button class="btn" data-sel="node">Free Node</button>
                 <button class="btn" data-sel="span_rib">Span Rib</button>
                 <button class="btn" data-sel="chord_edge">Chord Edge</button>
+                <button class="btn" data-sel="sub_zone">Sub-Zone</button>
                 <button class="btn" data-sel="whole_part">Whole Part</button>
               </div>
 
@@ -114,7 +196,7 @@ export class HudController {
           </div>
 
           <div>
-            <div class="section-title"><span>3. FIA 2026 Appendix 1 Box & View</span></div>
+            <div class="section-title"><span>7. FIA 2026 Appendix 1 Box & View</span></div>
             <div class="control-group">
               <label class="check-row">
                 <input type="checkbox" id="chk-clamp-fia" checked />
@@ -258,7 +340,7 @@ export class HudController {
           <button class="btn btn-sm" data-cam="top_plan">Top Plan</button>
         </div>
         <div class="hint-line">
-          <b>WASD / Arrows</b> Move Cam (<b>Q/E</b> Up/Dn · <b>Shift</b> Fast) · <b>1–7</b> Part · <b>G</b> Move · <b>R</b> Twist · <b>Tab</b> CAD / CFD · <b>X</b> Active Aero
+          <b>WASD / Arrows</b> Move Cam (<b>Q/E</b> Up/Dn · <b>Shift</b> Fast) · <b>1–9/0/-</b> Part · <b>G</b> Move · <b>R</b> Twist · <b>Tab</b> CAD / CFD · <b>X</b> Active Aero
         </div>
       </div>
 
@@ -270,6 +352,13 @@ export class HudController {
     this.leftSculptContainer = this.root.querySelector('#left-sculpt-view')!;
     this.leftCfdContainer = this.root.querySelector('#left-cfd-view')!;
     this.partListEl = this.root.querySelector('#part-list')!;
+    this.subzoneListEl = this.root.querySelector('#subzone-list')!;
+    this.subzoneDescEl = this.root.querySelector('#subzone-desc')!;
+    this.paramSlidersBoxEl = this.root.querySelector('#param-sliders-box')!;
+    this.procElementsBoxEl = this.root.querySelector('#proc-elements-box')!;
+    this.wheelStanceBoxEl = this.root.querySelector('#wheel-stance-box')!;
+    this.wheelStanceSectionEl = this.root.querySelector('#wheel-stance-section')!;
+    this.stanceToggleBtnEl = this.root.querySelector('#btn-toggle-stance')!;
     this.sculptInfoEl = this.root.querySelector('#sculpt-coord-info')!;
     this.rightTelemetryEl = this.root.querySelector('#hud-right-telemetry')!;
     this.legendEl = this.root.querySelector('#hud-legend')!;
@@ -293,8 +382,51 @@ export class HudController {
     this.sliceToggleCheckbox = this.root.querySelector('#chk-show-slice')!;
     this.streamToggleCheckbox = this.root.querySelector('#chk-show-streamlines')!;
 
+    this.buildWheelStanceSliders();
     this.bindLeftPanelEvents();
     this.bindCameraBarEvents();
+  }
+
+  private buildWheelStanceSliders(): void {
+    this.wheelStanceBoxEl.innerHTML = STANCE_SLIDER_DEFS.map((def) => {
+      const val = this.store.wheelStance[def.key];
+      return `
+        <div class="slider-row">
+          <div class="slider-header">
+            <span>${def.label}</span>
+            <span class="slider-val" data-stance-val="${def.key}">${fmtSigned(val, def.digits, def.unit)}</span>
+          </div>
+          <input
+            type="range"
+            data-stance-inp="${def.key}"
+            min="${def.min}"
+            max="${def.max}"
+            step="${def.step}"
+            value="${val}"
+          />
+        </div>
+      `;
+    }).join('');
+
+    this.wheelStanceBoxEl
+      .querySelectorAll<HTMLInputElement>('input[data-stance-inp]')
+      .forEach((inp) => {
+        const key = inp.dataset.stanceInp as keyof WheelStanceSettings;
+        const def = STANCE_SLIDER_DEFS.find((d) => d.key === key)!;
+        const recordUndo = () => this.store.pushUndoCheckpoint();
+        inp.addEventListener('pointerdown', recordUndo);
+        inp.addEventListener('mousedown', recordUndo);
+        inp.addEventListener('input', () => {
+          const v = parseFloat(inp.value);
+          const valSpan = this.wheelStanceBoxEl.querySelector<HTMLElement>(
+            `[data-stance-val="${key}"]`
+          );
+          if (valSpan) {
+            valSpan.textContent = fmtSigned(v, def.digits, def.unit);
+          }
+          this.store.updateWheelStance({ [key]: v });
+        });
+      });
   }
 
   private bindLeftPanelEvents(): void {
@@ -304,6 +436,23 @@ export class HudController {
 
     this.root.querySelector('#btn-reset-part')!.addEventListener('click', () => {
       this.store.resetActivePartToBaseline();
+    });
+
+    this.root.querySelectorAll<HTMLButtonElement>('#cat-filter-btns button').forEach((btn) => {
+      btn.addEventListener('click', () => {
+        const cat = btn.dataset.cat as 'all' | PartCategory;
+        this.store.setActiveCategory(cat);
+      });
+    });
+
+    this.root.querySelector('#btn-reset-stance')!.addEventListener('click', () => {
+      this.store.pushUndoCheckpoint();
+      this.store.resetWheelStance();
+    });
+
+    this.stanceToggleBtnEl.addEventListener('click', () => {
+      this.stanceExpanded = !this.stanceExpanded;
+      this.syncWheelStanceControls();
     });
 
     this.root.querySelectorAll<HTMLButtonElement>('#select-mode-btns button').forEach((btn) => {
@@ -453,10 +602,22 @@ export class HudController {
       } else if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'y') {
         e.preventDefault();
         this.store.redo();
-      } else if (!e.ctrlKey && !e.metaKey && !e.altKey && e.key.toLowerCase() === 'g' && this.store.appMode === 'sculpt') {
+      } else if (
+        !e.ctrlKey &&
+        !e.metaKey &&
+        !e.altKey &&
+        e.key.toLowerCase() === 'g' &&
+        this.store.appMode === 'sculpt'
+      ) {
         this.store.gizmoMode = 'translate';
         this.store.emit();
-      } else if (!e.ctrlKey && !e.metaKey && !e.altKey && e.key.toLowerCase() === 'r' && this.store.appMode === 'sculpt') {
+      } else if (
+        !e.ctrlKey &&
+        !e.metaKey &&
+        !e.altKey &&
+        e.key.toLowerCase() === 'r' &&
+        this.store.appMode === 'sculpt'
+      ) {
         this.store.gizmoMode = 'rotate';
         this.store.emit();
       } else if (!e.ctrlKey && !e.metaKey && !e.altKey && e.key.toLowerCase() === 'x') {
@@ -465,10 +626,10 @@ export class HudController {
         this.store.updateTunnelSettings({ activeAeroMode: nextMode });
       } else if (!e.ctrlKey && !e.metaKey && !e.altKey && e.key.toLowerCase() === 'f') {
         this.sceneMgr.focusPart(this.store.activePartId);
-      } else if (!e.ctrlKey && !e.metaKey && !e.altKey && e.key >= '1' && e.key <= '7') {
-        const idx = parseInt(e.key, 10) - 1;
-        if (PART_ORDER[idx]) {
-          this.store.setActivePart(PART_ORDER[idx]);
+      } else if (!e.ctrlKey && !e.metaKey && !e.altKey) {
+        const keyIdx = PART_SHORTCUT_KEYS.indexOf(e.key);
+        if (keyIdx >= 0 && PART_ORDER[keyIdx]) {
+          this.store.setActivePart(PART_ORDER[keyIdx]);
         }
       }
     });
@@ -545,6 +706,10 @@ export class HudController {
 
     if (isSculpt) {
       this.renderPartCards();
+      this.renderSubZoneChips();
+      this.syncParametricSliders();
+      this.syncProceduralElements();
+      this.syncWheelStanceControls();
       this.syncSculptControls();
     } else {
       this.syncCfdControls();
@@ -559,30 +724,44 @@ export class HudController {
 
   private renderPartCards(): void {
     const res = this.store.cfdResult;
-    this.partListEl.innerHTML = PART_ORDER.map((id, idx) => {
-      const p = this.store.parts[id];
-      const m = res.partMetrics[id];
-      const sel = id === this.store.activePartId ? 'selected' : '';
-      const badge = m.isLegal
-        ? `<span class="badge badge-legal">FIA OK</span>`
-        : `<span class="badge badge-illegal">ILLEGAL</span>`;
+    const activeCat = this.store.activeCategory;
 
-      return `
-        <div class="part-card ${sel}" data-part="${id}">
-          <div class="part-row-top">
-            <span class="part-name">
-              <span class="part-dot" style="background:${p.accentHex}"></span>
-              ${idx + 1}. ${p.shortName}
-            </span>
-            ${badge}
+    this.root.querySelectorAll<HTMLButtonElement>('#cat-filter-btns button').forEach((btn) => {
+      btn.classList.toggle('active', btn.dataset.cat === activeCat);
+    });
+
+    const filteredIds = PART_ORDER.filter(
+      (id) => activeCat === 'all' || this.store.parts[id].category === activeCat
+    );
+
+    this.partListEl.innerHTML = filteredIds
+      .map((id) => {
+        const idx = PART_ORDER.indexOf(id);
+        const p = this.store.parts[id];
+        const m = res.partMetrics[id];
+        const sel = id === this.store.activePartId ? 'selected' : '';
+        const badge = m.isLegal
+          ? `<span class="badge badge-legal">OK</span>`
+          : `<span class="badge badge-illegal">OUT</span>`;
+        const keyHint = PART_SHORTCUT_KEYS[idx] ?? String(idx + 1);
+
+        return `
+          <div class="part-card ${sel}" data-part="${id}" title="${p.name} (${p.articleRef}) — Shortcut [${keyHint}]">
+            <div class="part-row-top">
+              <span class="part-name">
+                <span class="part-dot" style="background:${p.accentHex}"></span>
+                <span class="part-num">${idx + 1}.</span> ${p.shortName}
+              </span>
+              ${badge}
+            </div>
+            <div class="part-row-sub">
+              <span>DF ${m.downforceN}N</span>
+              <span>D ${m.dragN}N</span>
+            </div>
           </div>
-          <div class="part-row-sub">
-            <span>${p.articleRef}</span>
-            <span>DF ${m.downforceN}N · D ${m.dragN}N</span>
-          </div>
-        </div>
-      `;
-    }).join('');
+        `;
+      })
+      .join('');
 
     this.partListEl.querySelectorAll<HTMLElement>('.part-card').forEach((card) => {
       card.addEventListener('click', () => {
@@ -594,6 +773,316 @@ export class HudController {
         this.sceneMgr.focusPart(pid);
       });
     });
+  }
+
+  private renderSubZoneChips(): void {
+    const part = this.store.getActivePart();
+    const activeZoneId = this.store.activeSubZoneId;
+
+    const allChip = `
+      <button class="subzone-chip ${activeZoneId === 'all' ? 'active' : ''}" data-zone="all">
+        All Zones
+      </button>
+    `;
+
+    const zoneChips = part.subZones
+      .map((z) => {
+        const isAct = activeZoneId === z.id ? 'active' : '';
+        return `
+          <button class="subzone-chip ${isAct}" data-zone="${z.id}">
+            ${z.label}
+          </button>
+        `;
+      })
+      .join('');
+
+    this.subzoneListEl.innerHTML = allChip + zoneChips;
+
+    const selectedZone = part.subZones.find((z) => z.id === activeZoneId);
+    this.subzoneDescEl.textContent = selectedZone
+      ? selectedZone.description
+      : `${part.articleRef} — Full ${part.cols}×${part.rows} control lattice active`;
+
+    this.subzoneListEl.querySelectorAll<HTMLButtonElement>('.subzone-chip').forEach((btn) => {
+      btn.addEventListener('click', () => {
+        const zid = btn.dataset.zone || 'all';
+        this.store.setActiveSubZone(zid);
+      });
+    });
+  }
+
+  private syncParametricSliders(): void {
+    const part = this.store.getActivePart();
+
+    if (this.renderedParamPartId !== part.id) {
+      this.renderedParamPartId = part.id;
+      this.paramSlidersBoxEl.innerHTML = part.paramSliders
+        .map((s) => {
+          const val = part.paramValues[s.id] ?? s.defaultValue;
+          const digits = s.step < 1 ? 1 : 0;
+          return `
+            <div class="slider-row">
+              <div class="slider-header">
+                <span>${s.label}</span>
+                <span class="slider-val" data-param-val="${s.id}">${fmtSigned(val, digits, s.unit === '°' ? '°' : ` ${s.unit}`)}</span>
+              </div>
+              <input
+                type="range"
+                data-param-inp="${s.id}"
+                min="${s.min}"
+                max="${s.max}"
+                step="${s.step}"
+                value="${val}"
+              />
+            </div>
+          `;
+        })
+        .join('');
+
+      this.paramSlidersBoxEl
+        .querySelectorAll<HTMLInputElement>('input[data-param-inp]')
+        .forEach((inp) => {
+          const paramId = inp.dataset.paramInp!;
+          const sliderDef = part.paramSliders.find((s) => s.id === paramId)!;
+          const digits = sliderDef.step < 1 ? 1 : 0;
+          const unitSuffix = sliderDef.unit === '°' ? '°' : ` ${sliderDef.unit}`;
+
+          const recordUndo = () => this.store.pushUndoCheckpoint();
+          inp.addEventListener('pointerdown', recordUndo);
+          inp.addEventListener('mousedown', recordUndo);
+          inp.addEventListener('input', () => {
+            const v = parseFloat(inp.value);
+            const valEl = this.paramSlidersBoxEl.querySelector<HTMLElement>(
+              `[data-param-val="${paramId}"]`
+            );
+            if (valEl) {
+              valEl.textContent = fmtSigned(v, digits, unitSuffix);
+            }
+            this.store.setPartParamValue(part.id, paramId, v);
+          });
+        });
+      return;
+    }
+
+    // Update values in-place without rebuilding DOM inputs
+    for (const s of part.paramSliders) {
+      const val = part.paramValues[s.id] ?? s.defaultValue;
+      const digits = s.step < 1 ? 1 : 0;
+      const unitSuffix = s.unit === '°' ? '°' : ` ${s.unit}`;
+      const inp = this.paramSlidersBoxEl.querySelector<HTMLInputElement>(
+        `input[data-param-inp="${s.id}"]`
+      );
+      if (inp && document.activeElement !== inp) {
+        inp.value = String(val);
+      }
+      const valEl = this.paramSlidersBoxEl.querySelector<HTMLElement>(
+        `[data-param-val="${s.id}"]`
+      );
+      if (valEl) {
+        valEl.textContent = fmtSigned(val, digits, unitSuffix);
+      }
+    }
+  }
+
+  private syncProceduralElements(): void {
+    const part = this.store.getActivePart();
+
+    if (this.renderedProcPartId !== part.id) {
+      this.renderedProcPartId = part.id;
+
+      if (part.proceduralElements.length === 0) {
+        this.procElementsBoxEl.innerHTML = `<div style="font-size:11px;color:var(--text-muted);">No procedural appendages for this component.</div>`;
+        return;
+      }
+
+      this.procElementsBoxEl.innerHTML = part.proceduralElements
+        .map((el) => {
+          const hasCountRange =
+            el.minCount !== undefined && el.maxCount !== undefined && el.maxCount > el.minCount;
+          const countHtml = hasCountRange
+            ? `
+              <div class="proc-count-ctrl">
+                <button class="btn btn-sm" data-proc-count-step="-1" data-proc-id="${el.id}" title="Decrease count">−</button>
+                <span class="proc-count-val" data-proc-count-val="${el.id}">${el.count}×</span>
+                <button class="btn btn-sm" data-proc-count-step="1" data-proc-id="${el.id}" title="Increase count">+</button>
+              </div>
+            `
+            : '';
+
+          return `
+            <div class="proc-card" data-proc-card="${el.id}">
+              <div class="proc-card-head">
+                <label class="check-row" style="font-weight:600;">
+                  <input type="checkbox" data-proc-enable="${el.id}" ${el.enabled ? 'checked' : ''} />
+                  <span>${el.label}</span>
+                </label>
+                ${countHtml}
+              </div>
+              <div class="proc-sliders">
+                <div class="slider-row">
+                  <div class="slider-header">
+                    <span>Incidence Pitch</span>
+                    <span class="slider-val" data-proc-pitch-val="${el.id}">${fmtSigned(el.pitchDeg, 0, '°')}</span>
+                  </div>
+                  <input
+                    type="range"
+                    data-proc-pitch="${el.id}"
+                    min="-15"
+                    max="25"
+                    step="1"
+                    value="${el.pitchDeg}"
+                  />
+                </div>
+                <div class="slider-row">
+                  <div class="slider-header">
+                    <span>Chord / Span Scale</span>
+                    <span class="slider-val" data-proc-scale-val="${el.id}">${el.scale.toFixed(2)}×</span>
+                  </div>
+                  <input
+                    type="range"
+                    data-proc-scale="${el.id}"
+                    min="0.6"
+                    max="1.4"
+                    step="0.05"
+                    value="${el.scale}"
+                  />
+                </div>
+              </div>
+            </div>
+          `;
+        })
+        .join('');
+
+      this.procElementsBoxEl
+        .querySelectorAll<HTMLInputElement>('input[data-proc-enable]')
+        .forEach((chk) => {
+          const elId = chk.dataset.procEnable!;
+          chk.addEventListener('change', () => {
+            this.store.pushUndoCheckpoint();
+            this.store.setProceduralElementConfig(part.id, elId, { enabled: chk.checked });
+          });
+        });
+
+      this.procElementsBoxEl
+        .querySelectorAll<HTMLInputElement>('input[data-proc-pitch]')
+        .forEach((inp) => {
+          const elId = inp.dataset.procPitch!;
+          const recordUndo = () => this.store.pushUndoCheckpoint();
+          inp.addEventListener('pointerdown', recordUndo);
+          inp.addEventListener('mousedown', recordUndo);
+          inp.addEventListener('input', () => {
+            const v = parseFloat(inp.value);
+            const valEl = this.procElementsBoxEl.querySelector<HTMLElement>(
+              `[data-proc-pitch-val="${elId}"]`
+            );
+            if (valEl) valEl.textContent = fmtSigned(v, 0, '°');
+            this.store.setProceduralElementConfig(part.id, elId, { pitchDeg: v });
+          });
+        });
+
+      this.procElementsBoxEl
+        .querySelectorAll<HTMLInputElement>('input[data-proc-scale]')
+        .forEach((inp) => {
+          const elId = inp.dataset.procScale!;
+          const recordUndo = () => this.store.pushUndoCheckpoint();
+          inp.addEventListener('pointerdown', recordUndo);
+          inp.addEventListener('mousedown', recordUndo);
+          inp.addEventListener('input', () => {
+            const v = parseFloat(inp.value);
+            const valEl = this.procElementsBoxEl.querySelector<HTMLElement>(
+              `[data-proc-scale-val="${elId}"]`
+            );
+            if (valEl) valEl.textContent = `${v.toFixed(2)}×`;
+            this.store.setProceduralElementConfig(part.id, elId, { scale: v });
+          });
+        });
+
+      this.procElementsBoxEl
+        .querySelectorAll<HTMLButtonElement>('button[data-proc-count-step]')
+        .forEach((btn) => {
+          const elId = btn.dataset.procId!;
+          const step = parseInt(btn.dataset.procCountStep!, 10);
+          btn.addEventListener('click', () => {
+            const curEl = this.store
+              .getActivePart()
+              .proceduralElements.find((e) => e.id === elId);
+            if (!curEl) return;
+            const minC = curEl.minCount ?? 1;
+            const maxC = curEl.maxCount ?? 6;
+            const nextC = Math.max(minC, Math.min(maxC, curEl.count + step));
+            if (nextC === curEl.count) return;
+            this.store.pushUndoCheckpoint();
+            this.store.setProceduralElementConfig(part.id, elId, { count: nextC });
+          });
+        });
+      return;
+    }
+
+    // Update values in-place
+    for (const el of part.proceduralElements) {
+      const chk = this.procElementsBoxEl.querySelector<HTMLInputElement>(
+        `input[data-proc-enable="${el.id}"]`
+      );
+      if (chk) chk.checked = el.enabled;
+
+      const pitchInp = this.procElementsBoxEl.querySelector<HTMLInputElement>(
+        `input[data-proc-pitch="${el.id}"]`
+      );
+      if (pitchInp && document.activeElement !== pitchInp) {
+        pitchInp.value = String(el.pitchDeg);
+      }
+      const pitchVal = this.procElementsBoxEl.querySelector<HTMLElement>(
+        `[data-proc-pitch-val="${el.id}"]`
+      );
+      if (pitchVal) pitchVal.textContent = fmtSigned(el.pitchDeg, 0, '°');
+
+      const scaleInp = this.procElementsBoxEl.querySelector<HTMLInputElement>(
+        `input[data-proc-scale="${el.id}"]`
+      );
+      if (scaleInp && document.activeElement !== scaleInp) {
+        scaleInp.value = String(el.scale);
+      }
+      const scaleVal = this.procElementsBoxEl.querySelector<HTMLElement>(
+        `[data-proc-scale-val="${el.id}"]`
+      );
+      if (scaleVal) scaleVal.textContent = `${el.scale.toFixed(2)}×`;
+
+      const countVal = this.procElementsBoxEl.querySelector<HTMLElement>(
+        `[data-proc-count-val="${el.id}"]`
+      );
+      if (countVal) countVal.textContent = `${el.count}×`;
+    }
+  }
+
+  private syncWheelStanceControls(): void {
+    const part = this.store.getActivePart();
+    if (this.lastAutoStancePartId !== part.id) {
+      this.lastAutoStancePartId = part.id;
+      if (part.category === 'suspension') {
+        this.stanceExpanded = true;
+      }
+    }
+
+    const showStance = this.stanceExpanded || part.category === 'suspension';
+    this.wheelStanceBoxEl.style.display = showStance ? 'grid' : 'none';
+    this.wheelStanceSectionEl.classList.toggle('stance-prominent', part.category === 'suspension');
+    this.stanceToggleBtnEl.textContent = showStance ? 'Collapse' : 'Expand';
+
+    for (const def of STANCE_SLIDER_DEFS) {
+      const val = this.store.wheelStance[def.key];
+      const inp = this.wheelStanceBoxEl.querySelector<HTMLInputElement>(
+        `input[data-stance-inp="${def.key}"]`
+      );
+      if (inp && document.activeElement !== inp) {
+        inp.value = String(val);
+      }
+      const valEl = this.wheelStanceBoxEl.querySelector<HTMLElement>(
+        `[data-stance-val="${def.key}"]`
+      );
+      if (valEl) {
+        valEl.textContent = fmtSigned(val, def.digits, def.unit);
+      }
+    }
   }
 
   private syncSculptControls(): void {

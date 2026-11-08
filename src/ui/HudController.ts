@@ -1,11 +1,14 @@
 import { RakePreset } from '../cfd/CFDVisualizer';
 import { CameraPreset, SceneManager } from '../editor/SceneManager';
-import { PART_ORDER, signedMarginInUnion, worldToFiaMm } from '../regulations/fia2026';
+import { DEFAULT_FIXTURES, PART_ORDER, signedMarginInUnion, worldToFiaMm } from '../regulations/fia2026';
 import { CarProjectStore } from '../state/CarProjectStore';
+import { LODStatus } from '../surface/lod';
 import {
   ActiveAeroMode,
+  FixtureId,
   PartCategory,
   PartId,
+  SculptHandleLevel,
   SculptSelectMode,
   StreamlineColorMode,
   SurfaceVizMode,
@@ -62,6 +65,10 @@ export class HudController {
   private wheelStanceBoxEl!: HTMLElement;
   private wheelStanceSectionEl!: HTMLElement;
   private stanceToggleBtnEl!: HTMLButtonElement;
+  private fixturesBoxEl!: HTMLElement;
+  private fixturesToggleBtnEl!: HTMLButtonElement;
+  private fixturesAllBtnEl!: HTMLButtonElement;
+  private toastContainerEl!: HTMLElement;
   private sculptInfoEl!: HTMLElement;
   private rightTelemetryEl!: HTMLElement;
   private legendEl!: HTMLElement;
@@ -89,10 +96,14 @@ export class HudController {
   private renderedParamPartId: PartId | null = null;
   private renderedProcPartId: PartId | null = null;
   private stanceExpanded = false;
+  private fixturesExpanded = true;
   private lastAutoStancePartId: PartId | null = null;
 
   private currentRake: RakePreset = 'full_car';
   private currentStreamColor: StreamlineColorMode = 'velocity';
+  private currentLodStatus: LODStatus = 'idle';
+  private currentLodDuration?: number;
+  private toastTimeoutId: number | null = null;
 
   constructor(
     private root: HTMLElement,
@@ -101,6 +112,11 @@ export class HudController {
   ) {
     this.buildLayout();
     this.bindKeyboardShortcuts();
+    this.sceneMgr.lodManager.subscribeStatus((status, durationMs) => {
+      this.currentLodStatus = status;
+      this.currentLodDuration = durationMs;
+      this.syncLodBadge();
+    });
     this.store.subscribe(() => this.syncUI());
     this.syncUI();
   }
@@ -110,6 +126,7 @@ export class HudController {
       <header class="topbar" id="hud-topbar"></header>
 
       <div class="loading-overlay" id="hud-loading" style="display:none;"></div>
+      <div class="toast-overlay" id="hud-toast-container"></div>
 
       <aside class="side-panel left-panel">
         <div id="left-sculpt-view" style="display:flex;flex-direction:column;gap:10px;">
@@ -163,12 +180,29 @@ export class HudController {
             <div class="control-group stance-grid" id="wheel-stance-box" style="display:none;"></div>
           </div>
 
+          <div id="fixtures-section">
+            <div class="section-title">
+              <span>6. Vehicle Fixtures & Aero Hardware</span>
+              <div style="display:flex;gap:4px;">
+                <button class="btn btn-sm" id="btn-fixtures-all">All On</button>
+                <button class="btn btn-sm" id="btn-toggle-fixtures">Collapse</button>
+              </div>
+            </div>
+            <div class="control-group fixtures-grid" id="fixtures-box"></div>
+          </div>
+
           <div>
             <div class="section-title">
-              <span>6. 3D FFD Lattice & Gizmo</span>
+              <span>7. 3D FFD Lattice & Gizmo</span>
             </div>
             <div class="control-group">
-              <div style="font-size:11px;color:var(--text-muted);">Selection Target</div>
+              <div style="font-size:11px;color:var(--text-muted);">Control Lattice Level (Shortcut: <b>M</b>)</div>
+              <div class="seg-grid-2" id="handle-level-btns">
+                <button class="btn active" data-level="macro">Macro (Coarse)</button>
+                <button class="btn" data-level="detail">Detail (Dense)</button>
+              </div>
+
+              <div style="font-size:11px;color:var(--text-muted);margin-top:2px;">Selection Target</div>
               <div class="seg-grid-5" id="select-mode-btns">
                 <button class="btn" data-sel="node">Free Node</button>
                 <button class="btn" data-sel="span_rib">Span Rib</button>
@@ -196,7 +230,7 @@ export class HudController {
           </div>
 
           <div>
-            <div class="section-title"><span>7. FIA 2026 Appendix 1 Box & View</span></div>
+            <div class="section-title"><span>8. FIA 2026 Appendix 1 Box & View</span></div>
             <div class="control-group">
               <label class="check-row">
                 <input type="checkbox" id="chk-clamp-fia" checked />
@@ -340,7 +374,7 @@ export class HudController {
           <button class="btn btn-sm" data-cam="top_plan">Top Plan</button>
         </div>
         <div class="hint-line">
-          <b>WASD / Arrows</b> Move Cam (<b>Q/E</b> Up/Dn · <b>Shift</b> Fast) · <b>1–9/0/-</b> Part · <b>G</b> Move · <b>R</b> Twist · <b>Tab</b> CAD / CFD · <b>X</b> Active Aero
+          <b>WASD / Arrows</b> Move Cam (<b>Q/E</b> Up/Dn · <b>Shift</b> Fast) · <b>1–9/0/-</b> Part · <b>G</b> Move · <b>R</b> Twist · <b>M</b> Macro/Detail · <b>Tab</b> CAD / CFD · <b>X</b> Active Aero
         </div>
       </div>
 
@@ -349,6 +383,7 @@ export class HudController {
 
     this.topbarEl = this.root.querySelector('#hud-topbar')!;
     this.loadingBannerEl = this.root.querySelector('#hud-loading')!;
+    this.toastContainerEl = this.root.querySelector('#hud-toast-container')!;
     this.leftSculptContainer = this.root.querySelector('#left-sculpt-view')!;
     this.leftCfdContainer = this.root.querySelector('#left-cfd-view')!;
     this.partListEl = this.root.querySelector('#part-list')!;
@@ -359,6 +394,9 @@ export class HudController {
     this.wheelStanceBoxEl = this.root.querySelector('#wheel-stance-box')!;
     this.wheelStanceSectionEl = this.root.querySelector('#wheel-stance-section')!;
     this.stanceToggleBtnEl = this.root.querySelector('#btn-toggle-stance')!;
+    this.fixturesBoxEl = this.root.querySelector('#fixtures-box')!;
+    this.fixturesToggleBtnEl = this.root.querySelector('#btn-toggle-fixtures')!;
+    this.fixturesAllBtnEl = this.root.querySelector('#btn-fixtures-all')!;
     this.sculptInfoEl = this.root.querySelector('#sculpt-coord-info')!;
     this.rightTelemetryEl = this.root.querySelector('#hud-right-telemetry')!;
     this.legendEl = this.root.querySelector('#hud-legend')!;
@@ -383,6 +421,7 @@ export class HudController {
     this.streamToggleCheckbox = this.root.querySelector('#chk-show-streamlines')!;
 
     this.buildWheelStanceSliders();
+    this.buildFixturesList();
     this.bindLeftPanelEvents();
     this.bindCameraBarEvents();
   }
@@ -429,6 +468,28 @@ export class HudController {
       });
   }
 
+  private buildFixturesList(): void {
+    this.fixturesBoxEl.innerHTML = DEFAULT_FIXTURES.map((f) => {
+      const isChecked = this.store.fixtures[f.id] ?? f.visible;
+      return `
+        <label class="check-row fixture-item" title="[${f.category}] ${f.label}">
+          <input type="checkbox" data-fixture-chk="${f.id}" ${isChecked ? 'checked' : ''} />
+          <span class="fixture-label">${f.label}</span>
+        </label>
+      `;
+    }).join('');
+
+    this.fixturesBoxEl
+      .querySelectorAll<HTMLInputElement>('input[data-fixture-chk]')
+      .forEach((chk) => {
+        chk.addEventListener('change', () => {
+          const fixId = chk.dataset.fixtureChk as FixtureId;
+          this.store.pushUndoCheckpoint();
+          this.store.setFixtureVisible(fixId, chk.checked);
+        });
+      });
+  }
+
   private bindLeftPanelEvents(): void {
     this.root.querySelector('#btn-focus-part')!.addEventListener('click', () => {
       this.sceneMgr.focusPart(this.store.activePartId);
@@ -453,6 +514,27 @@ export class HudController {
     this.stanceToggleBtnEl.addEventListener('click', () => {
       this.stanceExpanded = !this.stanceExpanded;
       this.syncWheelStanceControls();
+    });
+
+    this.fixturesToggleBtnEl.addEventListener('click', () => {
+      this.fixturesExpanded = !this.fixturesExpanded;
+      this.syncFixturesControls();
+    });
+
+    this.fixturesAllBtnEl.addEventListener('click', () => {
+      const allVisible = DEFAULT_FIXTURES.every((f) => this.store.fixtures[f.id]);
+      const nextVisible = !allVisible;
+      this.store.pushUndoCheckpoint();
+      for (const f of DEFAULT_FIXTURES) {
+        this.store.setFixtureVisible(f.id, nextVisible);
+      }
+    });
+
+    this.root.querySelectorAll<HTMLButtonElement>('#handle-level-btns button').forEach((btn) => {
+      btn.addEventListener('click', () => {
+        const lvl = btn.dataset.level as SculptHandleLevel;
+        this.store.setActiveHandleLevel(lvl);
+      });
     });
 
     this.root.querySelectorAll<HTMLButtonElement>('#select-mode-btns button').forEach((btn) => {
@@ -624,6 +706,16 @@ export class HudController {
         const nextMode: ActiveAeroMode =
           this.store.tunnelSettings.activeAeroMode === 'z_mode' ? 'x_mode' : 'z_mode';
         this.store.updateTunnelSettings({ activeAeroMode: nextMode });
+      } else if (
+        !e.ctrlKey &&
+        !e.metaKey &&
+        !e.altKey &&
+        e.key.toLowerCase() === 'm' &&
+        this.store.appMode === 'sculpt'
+      ) {
+        const nextLvl: SculptHandleLevel =
+          this.store.activeHandleLevel === 'macro' ? 'detail' : 'macro';
+        this.store.setActiveHandleLevel(nextLvl);
       } else if (!e.ctrlKey && !e.metaKey && !e.altKey && e.key.toLowerCase() === 'f') {
         this.sceneMgr.focusPart(this.store.activePartId);
       } else if (!e.ctrlKey && !e.metaKey && !e.altKey) {
@@ -666,6 +758,9 @@ export class HudController {
               : 'FIA 2026 Scrutineering: OUT OF REFERENCE VOLUME'
           }</div>
         </div>
+        <div class="lod-status-badge ${this.currentLodStatus}" id="hud-lod-badge" title="WebWorker Catmull-Rom Tessellation Pipeline">
+          ${this.getLodStatusHtml()}
+        </div>
       </div>
 
       <div class="mode-switch">
@@ -700,7 +795,10 @@ export class HudController {
       .querySelector('#top-import')!
       .addEventListener('click', () => this.importFile());
 
-    // 2. Toggle Left View
+    // 2. Migration Toast
+    this.syncMigrationToast();
+
+    // 3. Toggle Left View
     this.leftSculptContainer.style.display = isSculpt ? 'flex' : 'none';
     this.leftCfdContainer.style.display = !isSculpt ? 'flex' : 'none';
 
@@ -710,6 +808,7 @@ export class HudController {
       this.syncParametricSliders();
       this.syncProceduralElements();
       this.syncWheelStanceControls();
+      this.syncFixturesControls();
       this.syncSculptControls();
     } else {
       this.syncCfdControls();
@@ -1085,7 +1184,85 @@ export class HudController {
     }
   }
 
+  private syncFixturesControls(): void {
+    this.fixturesBoxEl.style.display = this.fixturesExpanded ? 'grid' : 'none';
+    this.fixturesToggleBtnEl.textContent = this.fixturesExpanded ? 'Collapse' : 'Expand';
+
+    const allVisible = DEFAULT_FIXTURES.every((f) => this.store.fixtures[f.id]);
+    this.fixturesAllBtnEl.textContent = allVisible ? 'All Off' : 'All On';
+
+    for (const f of DEFAULT_FIXTURES) {
+      const chk = this.fixturesBoxEl.querySelector<HTMLInputElement>(
+        `input[data-fixture-chk="${f.id}"]`
+      );
+      if (chk) {
+        chk.checked = this.store.fixtures[f.id] ?? f.visible;
+      }
+    }
+  }
+
+  private syncMigrationToast(): void {
+    const msg = this.store.migrationToast;
+    if (!msg) {
+      this.toastContainerEl.style.display = 'none';
+      this.toastContainerEl.innerHTML = '';
+      if (this.toastTimeoutId !== null) {
+        window.clearTimeout(this.toastTimeoutId);
+        this.toastTimeoutId = null;
+      }
+      return;
+    }
+
+    this.toastContainerEl.style.display = 'flex';
+    this.toastContainerEl.innerHTML = `
+      <div class="migration-toast">
+        <div class="toast-badge">V2</div>
+        <div class="toast-body">
+          <div class="toast-title">Procedural Architecture Notice</div>
+          <div class="toast-msg">${msg}</div>
+        </div>
+        <button class="toast-close-btn" id="btn-close-toast" title="Dismiss">✕</button>
+      </div>
+    `;
+
+    this.toastContainerEl.querySelector('#btn-close-toast')?.addEventListener('click', () => {
+      this.store.clearMigrationToast();
+    });
+
+    if (this.toastTimeoutId === null) {
+      this.toastTimeoutId = window.setTimeout(() => {
+        this.store.clearMigrationToast();
+        this.toastTimeoutId = null;
+      }, 7000);
+    }
+  }
+
+  private getLodStatusHtml(): string {
+    switch (this.currentLodStatus) {
+      case 'preview_active':
+        return `<span class="lod-dot preview">⚡</span><span>Preview LOD (~31k)</span>`;
+      case 'tessellating_full':
+        return `<span class="lod-dot busy spin">⏳</span><span>Tessellating Full...</span>`;
+      case 'full_ready':
+        return `<span class="lod-dot ok">✓</span><span>Full LOD (${this.currentLodDuration ?? 0}ms)</span>`;
+      case 'idle':
+      default:
+        return `<span class="lod-dot ok">●</span><span>Full LOD</span>`;
+    }
+  }
+
+  private syncLodBadge(): void {
+    const badge = this.root.querySelector<HTMLElement>('#hud-lod-badge');
+    if (badge) {
+      badge.className = `lod-status-badge ${this.currentLodStatus}`;
+      badge.innerHTML = this.getLodStatusHtml();
+    }
+  }
+
   private syncSculptControls(): void {
+    this.root.querySelectorAll<HTMLButtonElement>('#handle-level-btns button').forEach((btn) => {
+      btn.classList.toggle('active', btn.dataset.level === this.store.activeHandleLevel);
+    });
     this.root.querySelectorAll<HTMLButtonElement>('#select-mode-btns button').forEach((btn) => {
       btn.classList.toggle('active', btn.dataset.sel === this.store.selectMode);
     });

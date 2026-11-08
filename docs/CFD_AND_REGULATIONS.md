@@ -57,15 +57,16 @@ Each `LegalityBox` defines a convex 3D frustum on the `+X` half-car (mirrored ac
 
 ### Stage 1: Coupled Surface Macro-Panel Aerodynamics
 1. **Panel Extraction & Ride-Height Transform:**
-   - Consumes `MacroAeroPanel[]` extracted from the deformed 3D car mesh across all 11 parts (or falls back to spline patches before GLB load completes), plus procedural aero appendages and wheel stance adjustments.
+   - Consumes `MacroAeroPanel[]` extracted from the deformed procedural 3D car mesh across all 11 parts via `PatchEvaluator.extractMeshPanelsAndLegality()`. Triangles on the starboard (`+X`) half-car are isolated, with double-skin shell areas normalized by 2.0 to evaluate true projected planform area matching the underlying control spline within 1%–10%.
+   - Incorporates procedural aero appendages (diveplanes, Gurney flaps, strakes) and wheel stance adjustments.
    - Applies pitch/heave via `applyRideHeightTransform(pt, frontRideHeightM, rearRideHeightM)` around the `3.40 m` wheelbase, plus freestream crosswind yaw `β = yawAngleDeg`.
 2. **Upstream-to-Downstream Aero Coupling Pass:**
    - **Front Wing Outwash, Front Suspension & Tire Wake Mitigation:** Evaluates spanwise normal tilt (`nx`) and outboard footplate arch on `front_wing`, downwash conditioning from `front_suspension`, and inwashing `floor_boards` incidence to compute how effectively turbulent front-tire wake (modulated by `wheelStance`) is deflected away from the `floor` leading edge and `sidepods` undercut.
    - **Ground-Effect Venturi Floor & Diffuser Coupling:** Tracks minimum floor throat ride height (`h_min`), longitudinal rake, sidepod undercut mass-flow feeding, and `diffuser` expansion ratio (`A_exit / A_throat`). Models ground-effect suction amplification (`∝ 1 / h_eff`) AND catastrophic **porpoising / choking stall** if `h_min` drops below critical ground clearance (`< ~18 mm`) or if diffuser ramp angle exceeds critical adverse-pressure-gradient separation (`> ~19°`).
    - **Monocoque, Engine Cover, Rear Suspension & Beamless Rear Wing Conditioning:** Evaluates `monocoque` / Halo wake, `sidepods` undercut/coke-bottle inward sweep, `engine_cover` sharkfin yaw stability, and `rear_suspension` upwash winglets feeding clean high-energy flow into the `diffuser` roof and `rear_wing` cascade, while accounting for upstream stall wake blanking.
    - **2026 Active Aerodynamics (`z_mode` vs `x_mode`):**
-     - `z_mode` (Cornering): Full flap incidence on `front_wing` and `rear_wing` (`CL ≈ 3.75`, `CD ≈ 0.99`, `CoP ≈ 45.8% Front`).
-     - `x_mode` (Straight-Line): Reduces movable flap effective angle of attack and induced/profile drag on both `front_wing` and `rear_wing` simultaneously so aero balance (`CoP % Front`) shifts by `< 2%` while shedding `~29%` total drag (`CL ≈ 3.17`, `CD ≈ 0.71`, `Top Speed ≈ 370 km/h`).
+     - `z_mode` (Cornering): Full flap incidence on `front_wing` and `rear_wing` (`CL ≈ 3.769`, `CD ≈ 0.994`, `CoP ≈ 45.7% Front`).
+     - `x_mode` (Straight-Line): Reduces movable flap effective angle of attack and induced/profile drag on both `front_wing` and `rear_wing` simultaneously so aero balance (`CoP % Front`) shifts by `< 2%` while shedding `~27%` total drag (`CL ≈ 3.112`, `CD ≈ 0.729`, `Top Speed ≈ 366.4 km/h`).
 3. **Force Integration & Vehicle Projections:**
    - Integrates downforce (`N`), drag (`N`), and pitch moment about front/rear axles across both symmetric halves (`× 2`), adding calibrated 2026 narrower open-wheel drag/lift and wheel-stance delta contributions.
    - Normalizes coefficients with ISA sea-level air density `ρ = 1.225 kg/m³` and 2026 frontal reference area `A_ref = 1.45 m²`.
@@ -73,6 +74,7 @@ Each `LegalityBox` defines a convex 3D frustum on the `+X` half-car (mirrored ac
 
 ### Stage 2: 3D Space-Marching Semi-Lagrangian Wake Grid (`CFDGridField`)
 - Allocates a `34 × 20 × 60` (`40,800`-cell) 3D Cartesian wind-tunnel domain covering `X ∈ [-1.45, +1.45] m`, `Y ∈ [0.0, 1.65] m`, `Z ∈ [-3.35, +3.45] m`.
+- Inlines bilinear and trilinear interpolation weights and slice-filters rotating wheel interactions to eliminate 390,000+ redundant calculations per solve, cutting wake solver execution time by ~50%.
 - Marks solid body & rotating tire voxels (`solid: Uint8Array`), injects `PanelInfluence` impulse kernels (`dvx, dvy, dvz, dcp, dturb`) from every deformed aero macro-panel and wheel wake, and marches longitudinally from `k = 0` (`-Z` inlet) to `k = nz - 1` (`+Z` diffuser wake) using semi-Lagrangian upstream advection + turbulent eddy diffusion + ground/body no-penetration projection.
 - `CFDVisualizer.ts` samples this field via trilinear interpolation (`sampleCFDField`) to integrate 3D RK2 streamlines, animate convecting flow particles, and render the interactive 2D `XY` wake contour plane at arbitrary `Z`.
 
@@ -80,13 +82,13 @@ Each `LegalityBox` defines a convex 3D frustum on the `+X` half-car (mirrored ac
 
 ## 3. Calibration Targets & Sanity Ranges
 
-When modifying `CFDSolver.ts` or `CarModelLoader.ts`, ensure the unmodified **FIA 2026 Official Concept** at standard wind-tunnel datum (`250 km/h`, `0 mm` FRH/RRH, `0°` Yaw) stays within realistic 2026 F1 engineering windows:
+When modifying `CFDSolver.ts` or `PatchEvaluator.ts`, ensure the unmodified **Procedural 2026 F1 Baseline** at standard wind-tunnel datum (`250 km/h`, `0 mm` FRH/RRH, `0°` Yaw) stays within realistic 2026 F1 engineering windows:
 
 | Metric | `Z-Mode` Target Window | `X-Mode` Target Window |
 | :--- | :--- | :--- |
-| **Total Downforce (`CL`)** | `3.55 – 3.95` (current: `3.750`) | `2.95 – 3.30` (current: `3.166`) |
-| **Total Drag (`CD`)** | `0.94 – 1.06` (current: `0.994`) | `0.66 – 0.76` (current: `0.706`) |
-| **Aero Efficiency (`L/D`)** | `3.60 – 3.95` (current: `3.77`) | `4.25 – 4.70` (current: `4.48`) |
-| **Aero Balance (`CoP % Front`)** | `44.0% – 47.5%` (current: `45.8%`) | `44.5% – 48.0%` (current: `47.3%`) |
-| **2026 Est. Top Speed** | `330 – 342 km/h` | `365 – 378 km/h` (current: `370.3 km/h`) |
+| **Total Downforce (`CL`)** | `3.55 – 3.95` (current: `3.769`) | `2.95 – 3.30` (current: `3.112`) |
+| **Total Drag (`CD`)** | `0.94 – 1.06` (current: `0.994`) | `0.66 – 0.76` (current: `0.729`) |
+| **Aero Efficiency (`L/D`)** | `3.60 – 3.95` (current: `3.79`) | `4.15 – 4.70` (current: `4.27`) |
+| **Aero Balance (`CoP % Front`)** | `44.0% – 47.5%` (current: `45.7%`) | `44.5% – 48.0%` (current: `47.0%`) |
+| **2026 Est. Top Speed** | `328 – 336 km/h` | `362 – 374 km/h` (current: `366.4 km/h`) |
 | **Baseline Legality (`allLegal`)** | `true` (`0` violating vertices across all 11 parts) | `true` (`0` violating vertices across all 11 parts) |

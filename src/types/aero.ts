@@ -46,6 +46,91 @@ export type SurfaceRole =
   | 'chassis_body'
   | 'suspension';
 
+export type SculptHandleLevel = 'macro' | 'detail';
+
+/**
+ * Two-tier B-spline/NURBS control cage for procedural parts-first deformation:
+ * - Macro cage: coarse engineering handles (e.g. 3x4 to 5x4) for high-level sweeps & AoA.
+ * - Detail cage: dense evaluation handles (e.g. 9x13 to 13x16) driven smoothly by the macro cage.
+ * - Detail offsets: local displacement vector per detail node, preserving fine features across macro drags.
+ */
+export interface CageV2 {
+  macroCols: number;
+  macroRows: number;
+  detailCols: number;
+  detailRows: number;
+  /** Macro control points [u][v] in meters on the +X half-car */
+  macro: Vec3[][];
+  /** Dense evaluated detail points [u][v] */
+  detail: Vec3[][];
+  /** Local offsets applied to detail points [u][v] */
+  detailOffsets: Vec3[][];
+}
+
+/**
+ * Topology link binding adjacent aerodynamic component boundaries.
+ * Ensures shared seam control points remain identical across deformation,
+ * guaranteeing 0 gap, 0 tearing, and 100% watertight bodywork by construction.
+ */
+export interface SeamLink {
+  id: string;
+  label: string;
+  partA: PartId;
+  partB: PartId;
+  nodesA: NodeIndex[];
+  nodesB: NodeIndex[];
+  type: 'shared_boundary' | 'tangent_continuous' | 'hardpoint_anchor';
+  weight?: number;
+}
+
+/**
+ * Mandatory homologated chassis, suspension & crash-structure hardpoints
+ * that cannot be freely displaced by aerodynamic surface deformation.
+ */
+export type HardpointId =
+  | 'front_axle_fl'
+  | 'front_axle_fr'
+  | 'rear_axle_rl'
+  | 'rear_axle_rr'
+  | 'survival_cell_front'
+  | 'survival_cell_rear'
+  | 'halo_apex'
+  | 'halo_mount_l'
+  | 'halo_mount_r'
+  | 'cockpit_rear_bulkhead'
+  | 'exhaust_centerline';
+
+export interface Hardpoint {
+  id: HardpointId;
+  label: string;
+  position: Vec3;
+  locked: boolean;
+  associatedParts: PartId[];
+}
+
+/**
+ * Non-sculptable procedural vehicle fixtures (wheels, halo safety ring, helmet, cockpit)
+ * that follow vehicle hardpoints and wheel stance transforms.
+ */
+export type FixtureId =
+  | 'wheel_fl'
+  | 'wheel_fr'
+  | 'wheel_rl'
+  | 'wheel_rr'
+  | 'halo_structure'
+  | 'mirror_l'
+  | 'mirror_r'
+  | 'driver_helmet'
+  | 'cockpit_interior'
+  | 'exhaust_tailpipe';
+
+export interface ProceduralFixtureConfig {
+  id: FixtureId;
+  label: string;
+  category: 'wheels' | 'cockpit' | 'safety' | 'powertrain';
+  visible: boolean;
+}
+
 /**
  * Named functional Sub-Zone within an aerodynamic or chassis component.
  */
@@ -55,6 +140,9 @@ export interface PartSubZone {
   description: string;
   uIndices: number[];
   vIndices: number[];
+  /** Optional dense detail cage index ranges for fine local sub-zone manipulation */
+  detailUIndices?: number[];
+  detailVIndices?: number[];
 }
 
 /**
@@ -82,6 +170,17 @@ export interface ProceduralElementConfig {
   count: number;
   minCount?: number;
   maxCount?: number;
+}
+
+/**
+ * Procedural appendage anchored via parametric (u, v) coordinates directly to the parent surface.
+ * Rides along with bodywork deformation without floating or clipping.
+ */
+export interface AnchoredAppendageConfig extends ProceduralElementConfig {
+  anchorU: number;
+  anchorV: number;
+  normalOffsetMm?: number;
+  spanAngleDeg?: number;
 }
 
 /**
@@ -145,8 +244,10 @@ export interface AeroPartData {
   cols: number;
   /** Number of longitudinal/chordwise control rows (v = 0 .. rows-1, front to rear) */
   rows: number;
-  /** 3D FFD control lattice grid[u][v] in meters on the +X half-car */
+  /** 3D FFD control lattice grid[u][v] in meters on the +X half-car (mirrors cage.macro) */
   grid: Vec3[][];
+  /** V2 two-tier procedural control cage */
+  cage?: CageV2;
   /** Selectable functional Sub-Zones within this part */
   subZones: PartSubZone[];
   /** Engineering macro sliders for this part */
@@ -291,6 +392,7 @@ export interface CFDResult {
 }
 
 export interface CarDesignSnapshot {
+  version?: 1;
   name: string;
   createdAt: number;
   carModelId?: CarModelId;
@@ -307,3 +409,33 @@ export interface CarDesignSnapshot {
     dragN: number;
   };
 }
+
+export interface CarDesignSnapshotV2 {
+  version: 2;
+  name: string;
+  createdAt: number;
+  carModelId?: CarModelId;
+  cages: Partial<
+    Record<
+      PartId,
+      {
+        macro: Vec3[][];
+        detailOffsets?: Vec3[][];
+      }
+    >
+  >;
+  paramValues?: Partial<Record<PartId, Record<string, number>>>;
+  proceduralElements?: Partial<Record<PartId, ProceduralElementConfig[]>>;
+  wheelStance?: WheelStanceSettings;
+  fixtures?: Partial<Record<FixtureId, boolean>>;
+  summary?: {
+    cl: number;
+    cd: number;
+    ldRatio: number;
+    copFrontPct: number;
+    downforceN: number;
+    dragN: number;
+  };
+}
+
+export type CarDesignSnapshotAny = CarDesignSnapshot | CarDesignSnapshotV2;

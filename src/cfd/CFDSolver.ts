@@ -32,6 +32,20 @@ const FIA_2026_WHEELS = {
   rear: { x: 0.728, y: 0.359, z: REAR_AXLE_Z, radius: 0.359, width: 0.426 },
 };
 
+const BASELINE_PART_HALF_AREAS: Record<PartId, number> = {
+  front_wing: 0.510,
+  nosecone: 0.341,
+  front_suspension: 0.199,
+  monocoque: 0.828,
+  floor_boards: 0.325,
+  floor: 1.542,
+  sidepods: 1.388,
+  engine_cover: 0.997,
+  rear_suspension: 0.263,
+  diffuser: 0.485,
+  rear_wing: 0.417,
+};
+
 function clamp(v: number, lo: number, hi: number): number {
   return v < lo ? lo : v > hi ? hi : v;
 }
@@ -80,33 +94,85 @@ export function sampleCFDField(
   const ty = fy - j0;
   const tz = fz - k0;
 
-  const idx = (i: number, j: number, k: number) => (k * field.ny + j) * field.nx + i;
+  const ny = field.ny;
+  const nx = field.nx;
+  const plane0 = k0 * ny;
+  const plane1 = k1 * ny;
 
-  const i000 = idx(i0, j0, k0);
-  const i100 = idx(i1, j0, k0);
-  const i010 = idx(i0, j1, k0);
-  const i110 = idx(i1, j1, k0);
-  const i001 = idx(i0, j0, k1);
-  const i101 = idx(i1, j0, k1);
-  const i011 = idx(i0, j1, k1);
-  const i111 = idx(i1, j1, k1);
+  const i000 = (plane0 + j0) * nx + i0;
+  const i100 = (plane0 + j0) * nx + i1;
+  const i010 = (plane0 + j1) * nx + i0;
+  const i110 = (plane0 + j1) * nx + i1;
+  const i001 = (plane1 + j0) * nx + i0;
+  const i101 = (plane1 + j0) * nx + i1;
+  const i011 = (plane1 + j1) * nx + i0;
+  const i111 = (plane1 + j1) * nx + i1;
 
-  const bilerpZ = (arr: Float32Array) => {
-    const c00 = arr[i000] * (1 - tx) + arr[i100] * tx;
-    const c10 = arr[i010] * (1 - tx) + arr[i110] * tx;
-    const c01 = arr[i001] * (1 - tx) + arr[i101] * tx;
-    const c11 = arr[i011] * (1 - tx) + arr[i111] * tx;
-    const c0 = c00 * (1 - ty) + c10 * ty;
-    const c1 = c01 * (1 - ty) + c11 * ty;
-    return c0 * (1 - tz) + c1 * tz;
-  };
+  const omTx = 1 - tx;
+  const omTy = 1 - ty;
+  const omTz = 1 - tz;
+
+  const w000 = omTx * omTy * omTz;
+  const w100 = tx * omTy * omTz;
+  const w010 = omTx * ty * omTz;
+  const w110 = tx * ty * omTz;
+  const w001 = omTx * omTy * tz;
+  const w101 = tx * omTy * tz;
+  const w011 = omTx * ty * tz;
+  const w111 = tx * ty * tz;
+
+  const vx = field.vx;
+  const vy = field.vy;
+  const vz = field.vz;
+  const cp = field.cp;
+  const turb = field.turbulence;
 
   return {
-    vx: bilerpZ(field.vx),
-    vy: bilerpZ(field.vy),
-    vz: bilerpZ(field.vz),
-    cp: bilerpZ(field.cp),
-    turb: bilerpZ(field.turbulence),
+    vx:
+      w000 * vx[i000] +
+      w100 * vx[i100] +
+      w010 * vx[i010] +
+      w110 * vx[i110] +
+      w001 * vx[i001] +
+      w101 * vx[i101] +
+      w011 * vx[i011] +
+      w111 * vx[i111],
+    vy:
+      w000 * vy[i000] +
+      w100 * vy[i100] +
+      w010 * vy[i010] +
+      w110 * vy[i110] +
+      w001 * vy[i001] +
+      w101 * vy[i101] +
+      w011 * vy[i011] +
+      w111 * vy[i111],
+    vz:
+      w000 * vz[i000] +
+      w100 * vz[i100] +
+      w010 * vz[i010] +
+      w110 * vz[i110] +
+      w001 * vz[i001] +
+      w101 * vz[i101] +
+      w011 * vz[i011] +
+      w111 * vz[i111],
+    cp:
+      w000 * cp[i000] +
+      w100 * cp[i100] +
+      w010 * cp[i010] +
+      w110 * cp[i110] +
+      w001 * cp[i001] +
+      w101 * cp[i101] +
+      w011 * cp[i011] +
+      w111 * cp[i111],
+    turb:
+      w000 * turb[i000] +
+      w100 * turb[i100] +
+      w010 * turb[i010] +
+      w110 * turb[i110] +
+      w001 * turb[i001] +
+      w101 * turb[i101] +
+      w011 * turb[i011] +
+      w111 * turb[i111],
   };
 }
 
@@ -311,20 +377,31 @@ export function runCFDSimulation(
     kEnd: number,
     impulsesByK: Map<number, PanelInfluence[]>
   ) => {
+    const fVx = field.vx;
+    const fVy = field.vy;
+    const fVz = field.vz;
+    const fCp = field.cp;
+    const fTurb = field.turbulence;
+    const fSolid = field.solid;
+
     for (let k = Math.max(1, kStart); k <= Math.min(nz - 1, kEnd); k++) {
       const z = minZ + k * dz;
+      const kPrev = k - 1;
+
+      // Filter wheels affecting this slice k only
+      const activeWheels = wheels.filter((w) => Math.abs(z - w.z) < w.radius * 1.35);
 
       for (let j = 0; j < ny; j++) {
         const y = minY + j * dy;
         for (let i = 0; i < nx; i++) {
           const x = minX + i * dx;
-          const c = cellIdx(i, j, k);
-          const cPrev = cellIdx(i, j, k - 1);
+          const c = (k * ny + j) * nx + i;
+          const cPrev = (kPrev * ny + j) * nx + i;
 
-          const vzPrev = Math.max(0.25 * vInf, field.vz[cPrev]);
+          const vzPrev = Math.max(0.25 * vInf, fVz[cPrev]);
           const dt = dz / vzPrev;
-          const xUp = clamp(x - field.vx[cPrev] * dt, minX, maxX - 0.001);
-          const yUp = clamp(y - field.vy[cPrev] * dt, minY, maxY - 0.001);
+          const xUp = clamp(x - fVx[cPrev] * dt, minX, maxX - 0.001);
+          const yUp = clamp(y - fVy[cPrev] * dt, minY, maxY - 0.001);
 
           const fx = ((xUp - minX) / (maxX - minX)) * (nx - 1);
           const fy = ((yUp - minY) / (maxY - minY)) * (ny - 1);
@@ -335,75 +412,73 @@ export function runCFDSimulation(
           const tx = fx - i0;
           const ty = fy - j0;
 
-          const bilerpPrev = (arr: Float32Array) => {
-            const v00 = arr[cellIdx(i0, j0, k - 1)];
-            const v10 = arr[cellIdx(i1, j0, k - 1)];
-            const v01 = arr[cellIdx(i0, j1, k - 1)];
-            const v11 = arr[cellIdx(i1, j1, k - 1)];
-            return (
-              (1 - tx) * (1 - ty) * v00 +
-              tx * (1 - ty) * v10 +
-              (1 - tx) * ty * v01 +
-              tx * ty * v11
-            );
-          };
+          const idx00 = (kPrev * ny + j0) * nx + i0;
+          const idx10 = (kPrev * ny + j0) * nx + i1;
+          const idx01 = (kPrev * ny + j1) * nx + i0;
+          const idx11 = (kPrev * ny + j1) * nx + i1;
 
-          const advVx = bilerpPrev(field.vx);
-          const advVy = bilerpPrev(field.vy);
-          const advVz = bilerpPrev(field.vz);
-          const advCp = bilerpPrev(field.cp);
-          const advTurb = bilerpPrev(field.turbulence);
+          const w00 = (1 - tx) * (1 - ty);
+          const w10 = tx * (1 - ty);
+          const w01 = (1 - tx) * ty;
+          const w11 = tx * ty;
 
-          field.vx[c] = vInfX + (advVx - vInfX) * 0.93;
-          field.vy[c] = advVy * 0.92;
-          if (j === 0 && field.vy[c] < 0) field.vy[c] = 0;
+          const advVx = w00 * fVx[idx00] + w10 * fVx[idx10] + w01 * fVx[idx01] + w11 * fVx[idx11];
+          const advVy = w00 * fVy[idx00] + w10 * fVy[idx10] + w01 * fVy[idx01] + w11 * fVy[idx11];
+          const advVz = w00 * fVz[idx00] + w10 * fVz[idx10] + w01 * fVz[idx01] + w11 * fVz[idx11];
+          const advCp = w00 * fCp[idx00] + w10 * fCp[idx10] + w01 * fCp[idx01] + w11 * fCp[idx11];
+          const advTurb = w00 * fTurb[idx00] + w10 * fTurb[idx10] + w01 * fTurb[idx01] + w11 * fTurb[idx11];
 
-          field.vz[c] = vInfZ + (advVz - vInfZ) * 0.95;
-          field.cp[c] = advCp * 0.82;
-          field.turbulence[c] = advTurb * 0.965;
+          fVx[c] = vInfX + (advVx - vInfX) * 0.93;
+          fVy[c] = advVy * 0.92;
+          if (j === 0 && fVy[c] < 0) fVy[c] = 0;
 
-          if (field.solid[c]) {
-            field.vz[c] = 0.22 * vInf;
-            field.cp[c] = 0.65;
-            field.turbulence[c] = Math.max(field.turbulence[c], 0.42);
+          fVz[c] = vInfZ + (advVz - vInfZ) * 0.95;
+          fCp[c] = advCp * 0.82;
+          fTurb[c] = advTurb * 0.965;
+
+          if (fSolid[c]) {
+            fVz[c] = 0.22 * vInf;
+            fCp[c] = 0.65;
+            fTurb[c] = Math.max(fTurb[c], 0.42);
           }
 
           // Rotating 2026 wheel bow deflection & tire squirt wake
-          for (const w of wheels) {
-            const camberRad = (w.camber * Math.PI) / 180;
-            const toeRad = (w.toe * Math.PI) / 180;
-            const wx =
-              w.sx *
-              (w.x +
-                (y - w.y) * Math.sin(camberRad) * w.sx +
-                (z - w.z) * Math.sin(toeRad) * w.sx);
-            const dxW = x - wx;
-            const dyW = y - w.y;
-            const dzW = z - w.z;
+          if (activeWheels.length > 0) {
+            for (const w of activeWheels) {
+              if (y >= w.y + w.radius * 1.3) continue;
+              const camberRad = (w.camber * Math.PI) / 180;
+              const toeRad = (w.toe * Math.PI) / 180;
+              const wx =
+                w.sx *
+                (w.x +
+                  (y - w.y) * Math.sin(camberRad) * w.sx +
+                  (z - w.z) * Math.sin(toeRad) * w.sx);
+              const dxW = x - wx;
+              const dyW = y - w.y;
+              const dzW = z - w.z;
 
-            if (Math.abs(dzW) < w.radius * 1.35 && y < w.y + w.radius * 1.3) {
               const distLat = Math.hypot(dxW / (w.width * 0.85), dyW / (w.radius * 1.1));
               if (distLat < 1.35) {
                 const strength = (1.35 - distLat) * 0.21 * vInf;
                 if (dzW < 0) {
-                  field.vx[c] += Math.sign(dxW || w.sx) * strength * 0.55;
-                  field.vy[c] += strength * 0.48;
-                  field.cp[c] += 0.22 * (1.35 - distLat);
+                  fVx[c] += Math.sign(dxW || w.sx) * strength * 0.55;
+                  fVy[c] += strength * 0.48;
+                  fCp[c] += 0.22 * (1.35 - distLat);
                 } else {
                   const squirt = y < 0.16 ? 1.32 : 1.0;
                   const dishFactor = 1.0 + clamp(dRimDish * 0.02, -0.15, 0.25);
                   const toeFactor = 1.0 + Math.abs(dFrontToe) * 1.5;
-                  field.turbulence[c] = clamp(
-                    field.turbulence[c] +
+                  fTurb[c] = clamp(
+                    fTurb[c] +
                       0.23 * (1.35 - distLat) * squirt * dishFactor * toeFactor,
                     0,
                     0.92
                   );
-                  field.vz[c] = Math.max(
+                  fVz[c] = Math.max(
                     0.28 * vInf,
-                    field.vz[c] - 0.15 * vInf * (1.35 - distLat)
+                    fVz[c] - 0.15 * vInf * (1.35 - distLat)
                   );
-                  field.cp[c] -= 0.12 * (1.35 - distLat);
+                  fCp[c] -= 0.12 * (1.35 - distLat);
                 }
               }
             }
@@ -421,8 +496,8 @@ export function runCFDSimulation(
   };
 
   // 2. Front-to-rear physical marching across all 11 FIA 2026 Components
-  const uSamples = 16;
-  const vSamples = 14;
+  const uSamples = 14;
+  const vSamples = 10;
 
   const partMetrics = {} as Record<PartId, PartCFDMetrics>;
   const partSurfaceMaps = {} as Record<PartId, PartSurfaceCpMap>;
@@ -493,14 +568,17 @@ export function runCFDSimulation(
     }
 
     let meshAreaScale = 1.0;
-    if (meshPanels && meshPanels.length > 0 && splineHalfArea > 1e-4) {
+    if (meshPanels && meshPanels.length > 0) {
       let realHalfArea = 0;
       for (const mp of meshPanels) {
         realHalfArea += mp.area;
         if (mp.cz < partMinZ) partMinZ = mp.cz;
         if (mp.cz > partMaxZ) partMaxZ = mp.cz;
       }
-      meshAreaScale = clamp(realHalfArea / splineHalfArea, 0.78, 1.28);
+      const baseArea = BASELINE_PART_HALF_AREAS[partId] ?? splineHalfArea;
+      if (baseArea > 1e-4) {
+        meshAreaScale = clamp(realHalfArea / baseArea, 0.78, 1.28);
+      }
     }
 
     // March CFD field up to the leading edge of this part
@@ -867,7 +945,7 @@ export function runCFDSimulation(
             cpUpper = clamp(-0.12 - 0.4 * Math.max(0, downwashBonus), -0.55, 0.25);
 
             const absNy = Math.max(0.35, Math.abs(n.y));
-            panelDownforce = quadArea * qInf * (cpUpper - cpLower) * absNy * 1.14;
+            panelDownforce = quadArea * qInf * (cpUpper - cpLower) * absNy * 1.01;
             panelDrag =
               quadArea *
               qInf *

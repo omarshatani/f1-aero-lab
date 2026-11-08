@@ -8,6 +8,7 @@ import {
 } from '../regulations/fia2026';
 import { CarProjectStore } from '../state/CarProjectStore';
 import { AeroPartData, NodeIndex, PartId, PartSubZone, Vec3 } from '../types/aero';
+import { checkAntiFold, isNodeOnLockedHardpoint } from './constraints';
 
 export class PartSculptor {
   public readonly root = new THREE.Group();
@@ -29,8 +30,10 @@ export class PartSculptor {
   private dragStartAnchorQuat = new THREE.Quaternion();
   private lastCfdUpdateMs = 0;
 
-  private readonly sphereGeo = new THREE.SphereGeometry(0.024, 14, 12);
-  private readonly mirrorSphereGeo = new THREE.SphereGeometry(0.015, 10, 8);
+  private readonly macroSphereGeo = new THREE.SphereGeometry(0.024, 14, 12);
+  private readonly detailSphereGeo = new THREE.SphereGeometry(0.013, 10, 8);
+  private readonly mirrorMacroSphereGeo = new THREE.SphereGeometry(0.015, 10, 8);
+  private readonly mirrorDetailSphereGeo = new THREE.SphereGeometry(0.009, 8, 6);
 
   constructor(
     private camera: THREE.Camera,
@@ -58,7 +61,8 @@ export class PartSculptor {
       const active = this.store.getActivePart();
       if (dragging) {
         this.store.pushUndoCheckpoint();
-        this.dragStartGrid = cloneGrid(active.grid);
+        const activeGrid = this.getActiveGrid(active);
+        this.dragStartGrid = cloneGrid(activeGrid);
         this.dragStartAnchorPos.copy(this.proxyAnchor.position);
         this.dragStartAnchorQuat.copy(this.proxyAnchor.quaternion);
       } else {
@@ -93,6 +97,20 @@ export class PartSculptor {
     }
   }
 
+  private getActiveGrid(part: AeroPartData): Vec3[][] {
+    if (this.store.activeHandleLevel === 'detail' && part.cage) {
+      return part.cage.detail;
+    }
+    return part.cage?.macro ?? part.grid;
+  }
+
+  private getActiveDimensions(part: AeroPartData): { cols: number; rows: number } {
+    if (this.store.activeHandleLevel === 'detail' && part.cage) {
+      return { cols: part.cage.detailCols, rows: part.cage.detailRows };
+    }
+    return { cols: part.cols, rows: part.rows };
+  }
+
   private resolveActiveSubZone(part: AeroPartData): PartSubZone | undefined {
     if (this.store.activeSubZoneId !== 'all') {
       const found = part.subZones.find((z) => z.id === this.store.activeSubZoneId);
@@ -100,9 +118,13 @@ export class PartSculptor {
     }
     if (this.store.selectMode === 'sub_zone' && part.subZones.length > 0) {
       const sel = this.store.selectedNode;
+      const isDetail = this.store.activeHandleLevel === 'detail';
       return (
-        part.subZones.find((z) => z.uIndices.includes(sel.u) && z.vIndices.includes(sel.v)) ??
-        part.subZones[0]
+        part.subZones.find((z) => {
+          const uIdx = isDetail && z.detailUIndices ? z.detailUIndices : z.uIndices.map(u => isDetail ? u * 3 : u);
+          const vIdx = isDetail && z.detailVIndices ? z.detailVIndices : z.vIndices.map(v => isDetail ? v * 3 : v);
+          return uIdx.includes(sel.u) && vIdx.includes(sel.v);
+        }) ?? part.subZones[0]
       );
     }
     return undefined;
@@ -110,19 +132,24 @@ export class PartSculptor {
 
   private computeAnchorPosition(): THREE.Vector3 {
     const part = this.store.getActivePart();
+    const activeGrid = this.getActiveGrid(part);
+    const { cols, rows } = this.getActiveDimensions(part);
     const sel = this.store.selectedNode;
     const mode = this.store.selectMode;
+    const isDetail = this.store.activeHandleLevel === 'detail';
 
     if (mode === 'sub_zone' || this.store.activeSubZoneId !== 'all') {
       const zone = this.resolveActiveSubZone(part);
-      if (zone && zone.uIndices.length > 0 && zone.vIndices.length > 0) {
+      if (zone) {
+        const uList = isDetail && zone.detailUIndices ? zone.detailUIndices : zone.uIndices.map(u => isDetail ? u * 3 : u);
+        const vList = isDetail && zone.detailVIndices ? zone.detailVIndices : zone.vIndices.map(v => isDetail ? v * 3 : v);
         const acc = new THREE.Vector3();
         let count = 0;
-        for (const u of zone.uIndices) {
-          if (u < 0 || u >= part.cols) continue;
-          for (const v of zone.vIndices) {
-            if (v < 0 || v >= part.rows) continue;
-            const p = part.grid[u][v];
+        for (const u of uList) {
+          if (u < 0 || u >= cols) continue;
+          for (const v of vList) {
+            if (v < 0 || v >= rows) continue;
+            const p = activeGrid[u][v];
             acc.x += p.x;
             acc.y += p.y;
             acc.z += p.z;
@@ -136,19 +163,21 @@ export class PartSculptor {
     }
 
     if (mode === 'node') {
-      const p = part.grid[sel.u][sel.v];
+      const validU = Math.min(cols - 1, Math.max(0, sel.u));
+      const validV = Math.min(rows - 1, Math.max(0, sel.v));
+      const p = activeGrid[validU][validV];
       return new THREE.Vector3(p.x, p.y, p.z);
     }
 
     const acc = new THREE.Vector3();
     let count = 0;
-    for (let u = 0; u < part.cols; u++) {
-      for (let v = 0; v < part.rows; v++) {
+    for (let u = 0; u < cols; u++) {
+      for (let v = 0; v < rows; v++) {
         if (mode === 'span_rib' && u !== sel.u) continue;
         if (mode === 'chord_edge' && v !== sel.v) continue;
-        acc.x += part.grid[u][v].x;
-        acc.y += part.grid[u][v].y;
-        acc.z += part.grid[u][v].z;
+        acc.x += activeGrid[u][v].x;
+        acc.y += activeGrid[u][v].y;
+        acc.z += activeGrid[u][v].z;
         count++;
       }
     }
@@ -159,6 +188,7 @@ export class PartSculptor {
   private getNodeWeight(partGrid: Vec3[][], u: number, v: number): number {
     const sel = this.store.selectedNode;
     const mode = this.store.selectMode;
+    const isDetail = this.store.activeHandleLevel === 'detail';
 
     if (mode === 'whole_part') return 1.0;
     if (mode === 'span_rib') return u === sel.u ? 1.0 : 0.0;
@@ -168,7 +198,10 @@ export class PartSculptor {
       const part = this.store.getActivePart();
       const zone = this.resolveActiveSubZone(part);
       if (zone) {
-        if (zone.uIndices.includes(u) && zone.vIndices.includes(v)) {
+        const uList = isDetail && zone.detailUIndices ? zone.detailUIndices : zone.uIndices.map(uz => isDetail ? uz * 3 : uz);
+        const vList = isDetail && zone.detailVIndices ? zone.detailVIndices : zone.vIndices.map(vz => isDetail ? vz * 3 : vz);
+
+        if (uList.includes(u) && vList.includes(v)) {
           return 1.0;
         }
         const radius = this.store.softFalloffRadius;
@@ -176,9 +209,9 @@ export class PartSculptor {
 
         const p = partGrid[u][v];
         let minDist = Infinity;
-        for (const zu of zone.uIndices) {
+        for (const zu of uList) {
           if (zu < 0 || zu >= partGrid.length) continue;
-          for (const zv of zone.vIndices) {
+          for (const zv of vList) {
             if (zv < 0 || zv >= partGrid[zu].length) continue;
             const zp = partGrid[zu][zv];
             const d = Math.hypot(p.x - zp.x, p.y - zp.y, p.z - zp.z);
@@ -195,17 +228,19 @@ export class PartSculptor {
     const radius = this.store.softFalloffRadius;
     if (radius <= 0.005) return 0.0;
 
-    const p0 = partGrid[sel.u][sel.v];
+    const validSelU = Math.min(partGrid.length - 1, Math.max(0, sel.u));
+    const validSelV = Math.min(partGrid[validSelU].length - 1, Math.max(0, sel.v));
+    const p0 = partGrid[validSelU][validSelV];
     const p = partGrid[u][v];
     const dist = Math.hypot(p.x - p0.x, p.y - p0.y, p.z - p0.z);
     if (dist >= radius) return 0.0;
-    // Smooth raised-cosine bell curve
     return 0.5 * (1 + Math.cos((Math.PI * dist) / radius));
   }
 
   private applyGizmoTransform(): void {
     if (!this.dragStartGrid) return;
     const part = this.store.getActivePart();
+    const { cols, rows } = this.getActiveDimensions(part);
 
     const deltaPos = new THREE.Vector3().subVectors(
       this.proxyAnchor.position,
@@ -221,12 +256,21 @@ export class PartSculptor {
     const tempVec = new THREE.Vector3();
     const weightedQuat = new THREE.Quaternion();
 
-    for (let u = 0; u < part.cols; u++) {
-      for (let v = 0; v < part.rows; v++) {
+    // Construct candidate grid
+    const candidateGrid: Vec3[][] = cloneGrid(this.dragStartGrid);
+
+    for (let u = 0; u < cols; u++) {
+      for (let v = 0; v < rows; v++) {
         const w = this.getNodeWeight(this.dragStartGrid, u, v);
         const startPt = this.dragStartGrid[u][v];
         if (w <= 0.0001) {
-          part.grid[u][v] = { ...startPt };
+          candidateGrid[u][v] = { ...startPt };
+          continue;
+        }
+
+        // Prevent dragging locked chassis hardpoint anchors
+        if (isNodeOnLockedHardpoint(part.id, u, v, cols, rows)) {
+          candidateGrid[u][v] = { ...startPt };
           continue;
         }
 
@@ -256,13 +300,31 @@ export class PartSculptor {
           candidate = clampPointToLegalityBoxes(candidate, part.legalityBoxes, lockCenter);
         }
 
-        part.grid[u][v] = candidate;
+        candidateGrid[u][v] = candidate;
+      }
+    }
+
+    // Anti-fold surface verification: reject if inverted
+    const antiFold = checkAntiFold(candidateGrid, this.dragStartGrid);
+    if (!antiFold.valid) {
+      // Quad fold or self-intersection prevented: keep current
+      return;
+    }
+
+    // Apply valid candidate movement through store with seam synchronization
+    for (let u = 0; u < cols; u++) {
+      for (let v = 0; v < rows; v++) {
+        const candidate = candidateGrid[u][v];
+        this.store.updatePartGridNode(part.id, u, v, candidate, this.store.activeHandleLevel);
       }
     }
 
     // Keep proxy anchor visually synced to clamped primary node in single-node translate mode
     if (this.store.selectMode === 'node' && this.store.gizmoMode === 'translate') {
-      const pClamped = part.grid[this.store.selectedNode.u][this.store.selectedNode.v];
+      const activeGrid = this.getActiveGrid(part);
+      const selU = Math.min(cols - 1, Math.max(0, this.store.selectedNode.u));
+      const selV = Math.min(rows - 1, Math.max(0, this.store.selectedNode.v));
+      const pClamped = activeGrid[selU][selV];
       this.proxyAnchor.position.set(pClamped.x, pClamped.y, pClamped.z);
     }
 
@@ -280,15 +342,15 @@ export class PartSculptor {
   public syncFromStore(): void {
     if (!this.root.visible) return;
     const part = this.store.getActivePart();
+    const { cols, rows } = this.getActiveDimensions(part);
 
-    // Ensure selectedNode is valid for current part
-    if (this.store.selectedNode.u >= part.cols || this.store.selectedNode.v >= part.rows) {
-      this.store.selectedNode = { u: part.cols - 1, v: part.rows - 1 };
+    // Ensure selectedNode is valid for active handle level
+    if (this.store.selectedNode.u >= cols || this.store.selectedNode.v >= rows) {
+      this.store.selectedNode = { u: cols - 1, v: rows - 1 };
     }
 
     this.transformControls.setMode(this.store.gizmoMode);
 
-    // Lock X gizmo arrow if only a centerline-locked u=0 node is affected
     const onlyCenterNode =
       part.centerlineLocked &&
       this.store.selectMode === 'node' &&
@@ -308,7 +370,6 @@ export class PartSculptor {
   }
 
   private rebuildHandles(): void {
-    // Clear existing handles
     for (const h of this.handleMeshes) {
       (h.material as THREE.Material).dispose();
     }
@@ -317,22 +378,29 @@ export class PartSculptor {
     this.mirrorHandleGroup.clear();
 
     const part = this.store.getActivePart();
+    const { cols, rows } = this.getActiveDimensions(part);
+    const isDetail = this.store.activeHandleLevel === 'detail';
+
+    const sphereGeo = isDetail ? this.detailSphereGeo : this.macroSphereGeo;
+    const mirrorSphereGeo = isDetail ? this.mirrorDetailSphereGeo : this.mirrorMacroSphereGeo;
+
+    const baseHex = isDetail ? 0xf59e0b : 0x38bdf8;
     const mirrorMat = new THREE.MeshBasicMaterial({
-      color: 0x38bdf8,
+      color: baseHex,
       transparent: true,
       opacity: 0.35,
     });
 
-    for (let u = 0; u < part.cols; u++) {
-      for (let v = 0; v < part.rows; v++) {
-        const mat = new THREE.MeshBasicMaterial({ color: 0x38bdf8 });
-        const mesh = new THREE.Mesh(this.sphereGeo, mat);
+    for (let u = 0; u < cols; u++) {
+      for (let v = 0; v < rows; v++) {
+        const mat = new THREE.MeshBasicMaterial({ color: baseHex });
+        const mesh = new THREE.Mesh(sphereGeo, mat);
         mesh.userData = { nodeIndex: { u, v } as NodeIndex };
         this.handleGroup.add(mesh);
         this.handleMeshes.push(mesh);
 
         if (!(part.centerlineLocked && u === 0)) {
-          const mMesh = new THREE.Mesh(this.mirrorSphereGeo, mirrorMat);
+          const mMesh = new THREE.Mesh(mirrorSphereGeo, mirrorMat);
           mMesh.userData = { mirrorOf: { u, v } };
           this.mirrorHandleGroup.add(mMesh);
         }
@@ -342,22 +410,33 @@ export class PartSculptor {
 
   public updateCageAndHandles(): void {
     const part = this.store.getActivePart();
-    const activeZone =
-      this.store.activeSubZoneId !== 'all'
-        ? part.subZones.find((z) => z.id === this.store.activeSubZoneId)
-        : undefined;
+    const activeGrid = this.getActiveGrid(part);
+    const { cols, rows } = this.getActiveDimensions(part);
+    const isDetail = this.store.activeHandleLevel === 'detail';
+
+    const activeZone = this.resolveActiveSubZone(part);
+    const activeUList = activeZone
+      ? isDetail && activeZone.detailUIndices
+        ? activeZone.detailUIndices
+        : activeZone.uIndices.map(u => isDetail ? u * 3 : u)
+      : [];
+    const activeVList = activeZone
+      ? isDetail && activeZone.detailVIndices
+        ? activeZone.detailVIndices
+        : activeZone.vIndices.map(v => isDetail ? v * 3 : v)
+      : [];
+
     let mirrorPtr = 0;
 
     for (let i = 0; i < this.handleMeshes.length; i++) {
       const mesh = this.handleMeshes[i];
       const { u, v } = mesh.userData.nodeIndex as NodeIndex;
-      const pt = part.grid[u][v];
+      if (u >= cols || v >= rows) continue;
+      const pt = activeGrid[u][v];
       mesh.position.set(pt.x, pt.y, pt.z);
 
-      const w = this.getNodeWeight(part.grid, u, v);
-      const inActiveZone = Boolean(
-        activeZone && activeZone.uIndices.includes(u) && activeZone.vIndices.includes(v)
-      );
+      const w = this.getNodeWeight(activeGrid, u, v);
+      const inActiveZone = activeZone && activeUList.includes(u) && activeVList.includes(v);
       const isLegalNode = signedMarginInUnion(pt, part.legalityBoxes) >= -0.001;
       const mat = mesh.material as THREE.MeshBasicMaterial;
 
@@ -365,13 +444,13 @@ export class PartSculptor {
         mat.color.setHex(0xef4444);
         mesh.scale.setScalar(1.25);
       } else if (w >= 0.99 || inActiveZone) {
-        mat.color.setHex(0xfacc15);
+        mat.color.setHex(isDetail ? 0xfef08a : 0xfacc15);
         mesh.scale.setScalar(w >= 0.99 ? 1.3 : 1.18);
       } else if (w > 0.02) {
         mat.color.setHex(0xfb923c);
         mesh.scale.setScalar(1.0 + 0.25 * w);
       } else {
-        mat.color.setHex(0x38bdf8);
+        mat.color.setHex(isDetail ? 0xf59e0b : 0x38bdf8);
         mesh.scale.setScalar(0.92);
       }
 
@@ -383,16 +462,16 @@ export class PartSculptor {
       }
     }
 
-    // Update control lattice wireframe on +X and -X
+    // Build control lattice wireframe
     const buildLatticePositions = (side: 1 | -1): Float32Array => {
-      const segs = part.cols * (part.rows - 1) + (part.cols - 1) * part.rows;
+      const segs = cols * (rows - 1) + (cols - 1) * rows;
       const arr = new Float32Array(segs * 2 * 3);
       let k = 0;
       // Chordwise lines
-      for (let u = 0; u < part.cols; u++) {
-        for (let v = 0; v < part.rows - 1; v++) {
-          const a = part.grid[u][v];
-          const b = part.grid[u][v + 1];
+      for (let u = 0; u < cols; u++) {
+        for (let v = 0; v < rows - 1; v++) {
+          const a = activeGrid[u][v];
+          const b = activeGrid[u][v + 1];
           arr[k++] = a.x * side;
           arr[k++] = a.y;
           arr[k++] = a.z;
@@ -402,10 +481,10 @@ export class PartSculptor {
         }
       }
       // Spanwise ribs
-      for (let u = 0; u < part.cols - 1; u++) {
-        for (let v = 0; v < part.rows; v++) {
-          const a = part.grid[u][v];
-          const b = part.grid[u + 1][v];
+      for (let u = 0; u < cols - 1; u++) {
+        for (let v = 0; v < rows; v++) {
+          const a = activeGrid[u][v];
+          const b = activeGrid[u + 1][v];
           arr[k++] = a.x * side;
           arr[k++] = a.y;
           arr[k++] = a.z;
@@ -418,15 +497,19 @@ export class PartSculptor {
     };
 
     const posPlus = buildLatticePositions(1);
+    const wireColor = isDetail ? 0xfbbf24 : 0x7dd3fc;
+    const mirrorColor = isDetail ? 0xd97706 : 0x38bdf8;
+
     if (!this.cageLines) {
       const geo = new THREE.BufferGeometry();
       geo.setAttribute('position', new THREE.BufferAttribute(posPlus, 3));
       this.cageLines = new THREE.LineSegments(
         geo,
-        new THREE.LineBasicMaterial({ color: 0x7dd3fc, transparent: true, opacity: 0.78 })
+        new THREE.LineBasicMaterial({ color: wireColor, transparent: true, opacity: 0.78 })
       );
       this.root.add(this.cageLines);
     } else {
+      (this.cageLines.material as THREE.LineBasicMaterial).color.setHex(wireColor);
       this.cageLines.geometry.setAttribute('position', new THREE.BufferAttribute(posPlus, 3));
     }
 
@@ -436,10 +519,11 @@ export class PartSculptor {
       geo.setAttribute('position', new THREE.BufferAttribute(posMinus, 3));
       this.mirrorCageLines = new THREE.LineSegments(
         geo,
-        new THREE.LineBasicMaterial({ color: 0x38bdf8, transparent: true, opacity: 0.25 })
+        new THREE.LineBasicMaterial({ color: mirrorColor, transparent: true, opacity: 0.25 })
       );
       this.root.add(this.mirrorCageLines);
     } else {
+      (this.mirrorCageLines.material as THREE.LineBasicMaterial).color.setHex(mirrorColor);
       this.mirrorCageLines.geometry.setAttribute(
         'position',
         new THREE.BufferAttribute(posMinus, 3)
@@ -453,7 +537,6 @@ export class PartSculptor {
 
   private onPointerUp = (e: PointerEvent): void => {
     if (!this.root.visible || this.isDraggingGizmo) return;
-    // Ignore camera orbit drags (> 5px movement)
     if (Math.hypot(e.clientX - this.pointerDownPos.x, e.clientY - this.pointerDownPos.y) > 5) {
       return;
     }
@@ -466,7 +549,7 @@ export class PartSculptor {
 
     this.raycaster.setFromCamera(ndc, this.camera);
 
-    // 1. First test control point handles on active part
+    // Test control point handles on active part
     const handleHits = this.raycaster.intersectObjects(this.handleMeshes, false);
     if (handleHits.length > 0) {
       const node = handleHits[0].object.userData.nodeIndex as NodeIndex;
@@ -474,8 +557,7 @@ export class PartSculptor {
       return;
     }
 
-    // 2. Test clicking another car part to switch active part directly in 3D!
-    // Pre-filter by world/local boundingBox so high-poly FIA 2026 meshes raycast in < 2ms!
+    // Test clicking another car part
     const partMeshMap = this.getPartMeshes();
     const candidateMeshes: THREE.Mesh[] = [];
     for (const mesh of partMeshMap.values()) {

@@ -1,11 +1,16 @@
 import {
   AeroPartData,
+  CageV2,
+  Hardpoint,
   LegalityBox,
   LegalityCheckResult,
   NodeIndex,
   PartId,
   PartParamSlider,
   ProceduralElementConfig,
+  ProceduralFixtureConfig,
+  SculptHandleLevel,
+  SeamLink,
   Vec3,
   WheelStanceSettings,
 } from '../types/aero';
@@ -60,6 +65,157 @@ export function worldToFiaMm(p: Vec3): { xF: number; yFia: number; zFia: number 
     zFia: p.y * 1000.0 + FIA_TIRE_CONTACT_Z_MM,
   };
 }
+
+/**
+ * Shared boundary control node links between adjacent components.
+ * When a node in nodesA is edited, the corresponding node in nodesB is updated identically.
+ */
+export const SEAM_LINKS: SeamLink[] = [
+  {
+    id: 'seam_nose_monocoque',
+    label: 'Nosecone to Monocoque Bulkhead',
+    partA: 'nosecone',
+    partB: 'monocoque',
+    nodesA: [{ u: 0, v: 3 }, { u: 1, v: 3 }, { u: 2, v: 3 }],
+    nodesB: [{ u: 0, v: 0 }, { u: 1, v: 0 }, { u: 2, v: 0 }],
+    type: 'shared_boundary',
+  },
+  {
+    id: 'seam_monocoque_engine_cover',
+    label: 'Monocoque Cockpit Rear to Engine Cover',
+    partA: 'monocoque',
+    partB: 'engine_cover',
+    nodesA: [{ u: 0, v: 3 }, { u: 1, v: 3 }, { u: 2, v: 3 }],
+    nodesB: [{ u: 0, v: 0 }, { u: 1, v: 0 }, { u: 2, v: 0 }],
+    type: 'shared_boundary',
+  },
+  {
+    id: 'seam_floor_diffuser',
+    label: 'Underbody Floor to Diffuser Ramp Kickline',
+    partA: 'floor',
+    partB: 'diffuser',
+    nodesA: [{ u: 0, v: 4 }, { u: 1, v: 4 }, { u: 2, v: 4 }, { u: 3, v: 4 }],
+    nodesB: [{ u: 0, v: 0 }, { u: 1, v: 0 }, { u: 2, v: 0 }, { u: 3, v: 0 }],
+    type: 'shared_boundary',
+  },
+  {
+    id: 'seam_sidepods_engine_cover',
+    label: 'Sidepod Shoulder to Engine Cover Flank',
+    partA: 'sidepods',
+    partB: 'engine_cover',
+    nodesA: [{ u: 0, v: 1 }, { u: 0, v: 2 }],
+    nodesB: [{ u: 2, v: 0 }, { u: 2, v: 1 }],
+    type: 'shared_boundary',
+  },
+  {
+    id: 'seam_floor_boards_floor',
+    label: 'Floor Board Footplate to Floor Edge',
+    partA: 'floor_boards',
+    partB: 'floor',
+    nodesA: [{ u: 0, v: 1 }, { u: 0, v: 2 }],
+    nodesB: [{ u: 3, v: 0 }, { u: 3, v: 1 }],
+    type: 'shared_boundary',
+  },
+];
+
+/**
+ * Homologated 2026 chassis, crash structure & suspension hardpoints.
+ */
+export const HARDPOINTS_2026: Hardpoint[] = [
+  {
+    id: 'front_axle_fl',
+    label: 'Front Left Axle Hub',
+    position: fiaMmToWorld(0, -820, 330),
+    locked: true,
+    associatedParts: ['front_suspension'],
+  },
+  {
+    id: 'front_axle_fr',
+    label: 'Front Right Axle Hub',
+    position: fiaMmToWorld(0, 820, 330),
+    locked: true,
+    associatedParts: ['front_suspension'],
+  },
+  {
+    id: 'rear_axle_rl',
+    label: 'Rear Left Axle Hub',
+    position: fiaMmToWorld(3400, -820, 330),
+    locked: true,
+    associatedParts: ['rear_suspension'],
+  },
+  {
+    id: 'rear_axle_rr',
+    label: 'Rear Right Axle Hub',
+    position: fiaMmToWorld(3400, 820, 330),
+    locked: true,
+    associatedParts: ['rear_suspension'],
+  },
+  {
+    id: 'survival_cell_front',
+    label: 'Front Bulkhead Section A-A',
+    position: fiaMmToWorld(0, 0, 280),
+    locked: true,
+    associatedParts: ['nosecone', 'monocoque'],
+  },
+  {
+    id: 'survival_cell_rear',
+    label: 'Survival Cell Rear Bulkhead',
+    position: fiaMmToWorld(1550, 0, 750),
+    locked: true,
+    associatedParts: ['monocoque', 'engine_cover'],
+  },
+  {
+    id: 'halo_apex',
+    label: 'Titanium Halo Forward Ring Apex',
+    position: fiaMmToWorld(580, 0, 640),
+    locked: true,
+    associatedParts: ['monocoque'],
+  },
+  {
+    id: 'halo_mount_l',
+    label: 'Halo Left Rear Mounting Anchor',
+    position: fiaMmToWorld(1520, -220, 740),
+    locked: true,
+    associatedParts: ['monocoque'],
+  },
+  {
+    id: 'halo_mount_r',
+    label: 'Halo Right Rear Mounting Anchor',
+    position: fiaMmToWorld(1520, 220, 740),
+    locked: true,
+    associatedParts: ['monocoque'],
+  },
+  {
+    id: 'cockpit_rear_bulkhead',
+    label: 'Cockpit Roll-Hoop Bulkhead',
+    position: fiaMmToWorld(1550, 0, 860),
+    locked: true,
+    associatedParts: ['monocoque', 'engine_cover'],
+  },
+  {
+    id: 'exhaust_centerline',
+    label: 'Exhaust Tailpipe Centerline Outlet',
+    position: fiaMmToWorld(3620, 0, 340),
+    locked: true,
+    associatedParts: ['engine_cover'],
+  },
+];
+
+/**
+ * Default procedural fixtures (wheels, halo, mirrors, helmet, cockpit, exhaust).
+ */
+export const DEFAULT_FIXTURES: ProceduralFixtureConfig[] = [
+  { id: 'wheel_fl', label: 'Front Left Wheel & Rim', category: 'wheels', visible: true },
+  { id: 'wheel_fr', label: 'Front Right Wheel & Rim', category: 'wheels', visible: true },
+  { id: 'wheel_rl', label: 'Rear Left Wheel & Rim', category: 'wheels', visible: true },
+  { id: 'wheel_rr', label: 'Rear Right Wheel & Rim', category: 'wheels', visible: true },
+  { id: 'halo_structure', label: 'Titanium Halo Structure', category: 'safety', visible: true },
+  { id: 'mirror_l', label: 'Left Rearview Mirror', category: 'cockpit', visible: true },
+  { id: 'mirror_r', label: 'Right Rearview Mirror', category: 'cockpit', visible: true },
+  { id: 'driver_helmet', label: 'Driver Helmet & Visor', category: 'cockpit', visible: true },
+  { id: 'cockpit_interior', label: 'Cockpit Seat & Steering Wheel', category: 'cockpit', visible: true },
+  { id: 'exhaust_tailpipe', label: 'Central Exhaust Tailpipe', category: 'powertrain', visible: true },
+];
 
 function makeFiaBox(opts: {
   id: string;
@@ -349,6 +505,200 @@ export function cloneProceduralElements(
   return elements.map((el) => ({ ...el }));
 }
 
+function catmullRomScalar(p0: number, p1: number, p2: number, p3: number, t: number): number {
+  const t2 = t * t;
+  const t3 = t2 * t;
+  return (
+    0.5 *
+    (2 * p1 +
+      (-p0 + p2) * t +
+      (2 * p0 - 5 * p1 + 4 * p2 - p3) * t2 +
+      (-p0 + 3 * p1 - 3 * p2 + p3) * t3)
+  );
+}
+
+function catmullRomVec3(p0: Vec3, p1: Vec3, p2: Vec3, p3: Vec3, t: number): Vec3 {
+  return {
+    x: catmullRomScalar(p0.x, p1.x, p2.x, p3.x, t),
+    y: catmullRomScalar(p0.y, p1.y, p2.y, p3.y, t),
+    z: catmullRomScalar(p0.z, p1.z, p2.z, p3.z, t),
+  };
+}
+
+function evalCurveAlongArray(pts: Vec3[], s: number, mirrorStartAcrossX = false): Vec3 {
+  const n = pts.length;
+  if (n === 1) return { ...pts[0] };
+  const scaled = Math.max(0, Math.min(1, s)) * (n - 1);
+  const idx = Math.min(n - 2, Math.floor(scaled));
+  const frac = scaled - idx;
+
+  const getPt = (i: number): Vec3 => {
+    if (i < 0) {
+      if (mirrorStartAcrossX && n > 1) {
+        return { x: -pts[1].x, y: pts[1].y, z: pts[1].z };
+      }
+      return {
+        x: 2 * pts[0].x - pts[1].x,
+        y: 2 * pts[0].y - pts[1].y,
+        z: 2 * pts[0].z - pts[1].z,
+      };
+    }
+    if (i >= n) {
+      return {
+        x: 2 * pts[n - 1].x - pts[n - 2].x,
+        y: 2 * pts[n - 1].y - pts[n - 2].y,
+        z: 2 * pts[n - 1].z - pts[n - 2].z,
+      };
+    }
+    return pts[i];
+  };
+
+  return catmullRomVec3(getPt(idx - 1), getPt(idx), getPt(idx + 1), getPt(idx + 2), frac);
+}
+
+/**
+ * Evaluates the smooth bicubic Catmull-Rom detail control cage from a macro control lattice.
+ */
+export function interpolateMacroToDetail(
+  macro: Vec3[][],
+  detailCols: number,
+  detailRows: number,
+  detailOffsets?: Vec3[][],
+  lockCenterline = false
+): Vec3[][] {
+  const macroCols = macro.length;
+
+  // 1. Evaluate along v for each macro column u
+  const colSampled: Vec3[][] = [];
+  for (let u = 0; u < macroCols; u++) {
+    const col: Vec3[] = [];
+    for (let iv = 0; iv < detailRows; iv++) {
+      const sv = detailRows > 1 ? iv / (detailRows - 1) : 0;
+      col.push(evalCurveAlongArray(macro[u], sv, false));
+    }
+    colSampled.push(col);
+  }
+
+  // 2. Evaluate across u for each iv slice
+  const out: Vec3[][] = [];
+  for (let iu = 0; iu < detailCols; iu++) {
+    const col: Vec3[] = [];
+    const su = detailCols > 1 ? iu / (detailCols - 1) : 0;
+    for (let iv = 0; iv < detailRows; iv++) {
+      const rowCtrl: Vec3[] = [];
+      for (let u = 0; u < macroCols; u++) {
+        rowCtrl.push(colSampled[u][iv]);
+      }
+      const pt = evalCurveAlongArray(rowCtrl, su, lockCenterline && iu === 0);
+      if (detailOffsets && detailOffsets[iu] && detailOffsets[iu][iv]) {
+        const off = detailOffsets[iu][iv];
+        pt.x += off.x;
+        pt.y += off.y;
+        pt.z += off.z;
+      }
+      if (lockCenterline && iu === 0) {
+        pt.x = 0;
+      }
+      col.push(pt);
+    }
+    out.push(col);
+  }
+
+  return out;
+}
+
+/**
+ * Deep-clone a CageV2 instance.
+ */
+export function cloneCageV2(cage: CageV2): CageV2 {
+  return {
+    macroCols: cage.macroCols,
+    macroRows: cage.macroRows,
+    detailCols: cage.detailCols,
+    detailRows: cage.detailRows,
+    macro: cloneGrid(cage.macro),
+    detail: cloneGrid(cage.detail),
+    detailOffsets: cloneGrid(cage.detailOffsets),
+  };
+}
+
+/**
+ * Create a new CageV2 from a macro grid with default detail density ((cols-1)*3+1 x (rows-1)*3+1).
+ */
+export function createCageV2(macro: Vec3[][], lockCenterline = false): CageV2 {
+  const macroCols = macro.length;
+  const macroRows = macro[0].length;
+  const detailCols = (macroCols - 1) * 3 + 1;
+  const detailRows = (macroRows - 1) * 3 + 1;
+  const detailOffsets: Vec3[][] = Array.from({ length: detailCols }, () =>
+    Array.from({ length: detailRows }, () => ({ x: 0, y: 0, z: 0 }))
+  );
+  const detail = interpolateMacroToDetail(
+    macro,
+    detailCols,
+    detailRows,
+    detailOffsets,
+    lockCenterline
+  );
+  return {
+    macroCols,
+    macroRows,
+    detailCols,
+    detailRows,
+    macro: cloneGrid(macro),
+    detail,
+    detailOffsets,
+  };
+}
+
+/**
+ * Propagate edited control node coordinates across shared seam boundaries.
+ */
+export function syncSharedSeamNodes(
+  sourcePartId: PartId,
+  u: number,
+  v: number,
+  newPosition: Vec3,
+  cages: Partial<Record<PartId, CageV2>>,
+  handleLevel: SculptHandleLevel = 'macro'
+): void {
+  for (const seam of SEAM_LINKS) {
+    if (handleLevel === 'macro') {
+      if (seam.partA === sourcePartId) {
+        const idx = seam.nodesA.findIndex((n) => n.u === u && n.v === v);
+        if (idx >= 0 && seam.nodesB[idx]) {
+          const target = seam.nodesB[idx];
+          const cageB = cages[seam.partB];
+          if (cageB) {
+            cageB.macro[target.u][target.v] = { ...newPosition };
+            cageB.detail = interpolateMacroToDetail(
+              cageB.macro,
+              cageB.detailCols,
+              cageB.detailRows,
+              cageB.detailOffsets
+            );
+          }
+        }
+      } else if (seam.partB === sourcePartId) {
+        const idx = seam.nodesB.findIndex((n) => n.u === u && n.v === v);
+        if (idx >= 0 && seam.nodesA[idx]) {
+          const target = seam.nodesA[idx];
+          const cageA = cages[seam.partA];
+          if (cageA) {
+            cageA.macro[target.u][target.v] = { ...newPosition };
+            cageA.detail = interpolateMacroToDetail(
+              cageA.macro,
+              cageA.detailCols,
+              cageA.detailRows,
+              cageA.detailOffsets
+            );
+          }
+        }
+      }
+    }
+  }
+}
+
 function initDefaultParamValues(sliders: PartParamSlider[]): Record<string, number> {
   const out: Record<string, number> = {};
   for (const s of sliders) {
@@ -438,10 +788,15 @@ export function applyParametricOffsetsToGrid(
  * Reference Volumes (Appendix 1), Sub-Zones, Parametric Sliders, and Procedural Aero Elements.
  */
 export function createBaselineParts(): Record<PartId, AeroPartData> {
-  const makePart = (spec: Omit<AeroPartData, 'paramValues'>): AeroPartData => ({
-    ...spec,
-    paramValues: initDefaultParamValues(spec.paramSliders),
-  });
+  const makePart = (spec: Omit<AeroPartData, 'paramValues'>): AeroPartData => {
+    const cage = createCageV2(spec.grid, spec.centerlineLocked);
+    return {
+      ...spec,
+      cage,
+      grid: cage.macro,
+      paramValues: initDefaultParamValues(spec.paramSliders),
+    };
+  };
 
   return {
     front_wing: makePart({
@@ -634,19 +989,19 @@ export function createBaselineParts(): Record<PartId, AeroPartData> {
           [-1220, 0, 195],
           [-820, 0, 315],
           [-380, 0, 455],
-          [20, 0, 565],
+          [-50, 0, 540],
         ],
         [
           [-1190, 95, 175],
           [-800, 135, 285],
           [-370, 175, 415],
-          [20, 210, 520],
+          [-50, 215, 500],
         ],
         [
           [-1150, 115, 125],
           [-790, 155, 205],
           [-365, 195, 285],
-          [20, 230, 345],
+          [-50, 240, 300],
         ],
       ]),
       subZones: [
@@ -814,24 +1169,24 @@ export function createBaselineParts(): Record<PartId, AeroPartData> {
       grid: fiaGrid([
         // u=0: Centerline spine & Halo central pillar (Y=0)
         [
-          [-150, 0, 520],
+          [-50, 0, 540],
           [420, 0, 650],
           [1020, 0, 740],
-          [1560, 0, 780],
+          [1550, 0, 860],
         ],
         // u=1: Survival cell upper shoulder & Halo hoop
         [
-          [-120, 225, 480],
+          [-50, 215, 500],
           [440, 245, 595],
           [1040, 250, 665],
-          [1560, 240, 680],
+          [1550, 200, 720],
         ],
         // u=2: Lower tub flank & outboard mirror pod zone
         [
-          [-80, 250, 260],
+          [-50, 240, 300],
           [460, 320, 380],
           [1040, 560, 640],
-          [1540, 310, 460],
+          [1550, 270, 500],
         ],
       ]),
       subZones: [
@@ -921,8 +1276,8 @@ export function createBaselineParts(): Record<PartId, AeroPartData> {
       grid: fiaGrid([
         [
           [720, 680, 55],
-          [980, 720, 55],
-          [1220, 735, 55],
+          [950, 725, 58],
+          [1250, 740, 50],
           [1440, 720, 55],
         ],
         [
@@ -1030,28 +1385,28 @@ export function createBaselineParts(): Record<PartId, AeroPartData> {
           [1050, 0, 12],
           [1620, 0, 10],
           [2180, 0, 12],
-          [2700, 0, 18],
+          [2720, 0, 22],
         ],
         [
           [760, 260, 85],
           [1180, 310, 68],
           [1680, 310, 56],
           [2200, 300, 60],
-          [2700, 280, 68],
+          [2720, 200, 68],
         ],
         [
           [820, 510, 88],
           [1220, 540, 66],
           [1700, 540, 55],
           [2220, 520, 58],
-          [2700, 480, 65],
+          [2720, 380, 65],
         ],
         [
-          [900, 730, 62],
-          [1300, 745, 48],
+          [950, 725, 58],
+          [1250, 740, 50],
           [1750, 738, 42],
           [2250, 718, 44],
-          [2700, 685, 50],
+          [2720, 495, 51],
         ],
       ]),
       subZones: [
@@ -1151,8 +1506,8 @@ export function createBaselineParts(): Record<PartId, AeroPartData> {
       grid: fiaGrid([
         [
           [980, 250, 560],
-          [1700, 255, 555],
-          [2500, 215, 500],
+          [1550, 270, 500],
+          [2400, 210, 490],
           [3250, 145, 430],
         ],
         [
@@ -1256,22 +1611,22 @@ export function createBaselineParts(): Record<PartId, AeroPartData> {
       grid: fiaGrid([
         // u=0: Dorsal sharkfin ridge & airbox crown (Y=0)
         [
-          [1520, 0, 965],
+          [1550, 0, 860],
           [2150, 0, 885],
           [2820, 0, 775],
           [3480, 0, 625],
         ],
         // u=1: Upper engine cover cannon shelf
         [
-          [1560, 145, 760],
+          [1550, 200, 720],
           [2180, 155, 690],
           [2840, 130, 595],
           [3520, 95, 505],
         ],
         // u=2: Lower engine cover flank & exhaust tailpipe shroud
         [
-          [1620, 240, 560],
-          [2220, 210, 480],
+          [1550, 270, 500],
+          [2400, 210, 490],
           [2880, 155, 395],
           [3620, 85, 340],
         ],
@@ -1454,25 +1809,25 @@ export function createBaselineParts(): Record<PartId, AeroPartData> {
       rows: 4,
       grid: fiaGrid([
         [
-          [2760, 0, 25],
+          [2720, 0, 22],
           [3060, 0, 75],
           [3350, 0, 148],
           [3590, 0, 218],
         ],
         [
-          [2760, 155, 68],
+          [2720, 200, 68],
           [3060, 155, 125],
           [3350, 150, 195],
           [3580, 145, 258],
         ],
         [
-          [2760, 310, 65],
+          [2720, 380, 65],
           [3060, 305, 120],
           [3350, 290, 188],
           [3580, 280, 248],
         ],
         [
-          [2760, 425, 52],
+          [2720, 495, 51],
           [3060, 410, 95],
           [3350, 392, 150],
           [3580, 380, 198],
@@ -1746,4 +2101,31 @@ export function createPresetGrids(
   }
 
   return result;
+}
+
+/**
+ * Precomputed baseline V2 procedural control cages with shared seam welding.
+ */
+export const FITTED_CAGES_V2: Record<PartId, CageV2> = (() => {
+  const base = createBaselineParts();
+  const res = {} as Record<PartId, CageV2>;
+  for (const id of PART_ORDER) {
+    res[id] = cloneCageV2(base[id].cage!);
+  }
+  return res;
+})();
+
+/**
+ * Generates preset procedural V2 control cages with synchronized seam boundaries.
+ */
+export function createPresetCagesV2(
+  preset: 'baseline' | 'high_downforce' | 'low_drag'
+): Record<PartId, CageV2> {
+  const grids = createPresetGrids(preset);
+  const base = createBaselineParts();
+  const res = {} as Record<PartId, CageV2>;
+  for (const id of PART_ORDER) {
+    res[id] = createCageV2(grids[id], base[id].centerlineLocked);
+  }
+  return res;
 }

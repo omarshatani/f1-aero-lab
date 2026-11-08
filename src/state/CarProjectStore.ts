@@ -2,24 +2,35 @@ import { runCFDSimulation } from '../cfd/CFDSolver';
 import {
   applyParametricOffsetsToGrid,
   clampPointToLegalityBoxes,
+  cloneCageV2,
   cloneGrid,
   cloneProceduralElements,
   createBaselineParts,
+  createCageV2,
   createPresetGrids,
+  DEFAULT_FIXTURES,
   DEFAULT_WHEEL_STANCE,
+  FITTED_CAGES_V2,
+  interpolateMacroToDetail,
   PART_ORDER,
+  syncSharedSeamNodes,
 } from '../regulations/fia2026';
 import {
   AeroPartData,
   AppMode,
+  CageV2,
   CarDesignSnapshot,
+  CarDesignSnapshotAny,
+  CarDesignSnapshotV2,
   CarModelId,
   CFDResult,
+  FixtureId,
   MacroAeroPanel,
   NodeIndex,
   PartCategory,
   PartId,
   ProceduralElementConfig,
+  SculptHandleLevel,
   SculptSelectMode,
   SurfaceVizMode,
   TunnelSettings,
@@ -36,9 +47,11 @@ export interface MeshCFDData {
 
 interface UndoEntry {
   grids: Record<PartId, Vec3[][]>;
+  cages: Record<PartId, CageV2>;
   paramValues: Record<PartId, Record<string, number>>;
   proceduralElements: Record<PartId, ProceduralElementConfig[]>;
   wheelStance: WheelStanceSettings;
+  fixtures: Record<FixtureId, boolean>;
 }
 
 export class CarProjectStore {
@@ -57,6 +70,17 @@ export class CarProjectStore {
   public activePartId: PartId = 'front_wing';
   public activeSubZoneId = 'all';
   public selectedNode: NodeIndex = { u: 2, v: 3 };
+  public activeHandleLevel: SculptHandleLevel = 'macro';
+
+  public fixtures: Record<FixtureId, boolean> = (() => {
+    const res = {} as Record<FixtureId, boolean>;
+    for (const f of DEFAULT_FIXTURES) {
+      res[f.id] = f.visible;
+    }
+    return res;
+  })();
+
+  public migrationToast: string | null = null;
 
   public appMode: AppMode = 'sculpt';
   public selectMode: SculptSelectMode = 'node';
@@ -81,7 +105,7 @@ export class CarProjectStore {
   };
 
   public cfdResult: CFDResult;
-  public baselineSnapshot: CarDesignSnapshot;
+  public baselineSnapshot: CarDesignSnapshotAny;
 
   private meshDataProvider: (() => MeshCFDData | null) | null = null;
   private undoStack: UndoEntry[] = [];
@@ -120,10 +144,42 @@ export class CarProjectStore {
     }
   }
 
+  public getActiveHandleLevel(): SculptHandleLevel {
+    return this.activeHandleLevel;
+  }
+
+  public setActiveHandleLevel(level: SculptHandleLevel): void {
+    if (this.activeHandleLevel === level) return;
+    this.activeHandleLevel = level;
+    this.emit();
+  }
+
+  public setFixtureVisible(id: FixtureId, visible: boolean): void {
+    this.fixtures[id] = visible;
+    this.emit();
+  }
+
+  public clearMigrationToast(): void {
+    this.migrationToast = null;
+    this.emit();
+  }
+
   private cloneAllGrids(): Record<PartId, Vec3[][]> {
     const res = {} as Record<PartId, Vec3[][]>;
     for (const id of PART_ORDER) {
       res[id] = cloneGrid(this.parts[id].grid);
+    }
+    return res;
+  }
+
+  private cloneAllCages(): Record<PartId, CageV2> {
+    const res = {} as Record<PartId, CageV2>;
+    for (const id of PART_ORDER) {
+      if (this.parts[id].cage) {
+        res[id] = cloneCageV2(this.parts[id].cage!);
+      } else {
+        res[id] = createCageV2(this.parts[id].grid, this.parts[id].centerlineLocked);
+      }
     }
     return res;
   }
@@ -137,9 +193,11 @@ export class CarProjectStore {
     }
     return {
       grids: this.cloneAllGrids(),
+      cages: this.cloneAllCages(),
       paramValues,
       proceduralElements,
       wheelStance: { ...this.wheelStance },
+      fixtures: { ...this.fixtures },
     };
   }
 
@@ -147,10 +205,18 @@ export class CarProjectStore {
     for (const id of PART_ORDER) {
       this.parts[id].grid = cloneGrid(entry.grids[id]);
       this.baseGrids[id] = cloneGrid(entry.grids[id]);
+      if (entry.cages && entry.cages[id]) {
+        this.parts[id].cage = cloneCageV2(entry.cages[id]);
+      } else {
+        this.parts[id].cage = createCageV2(this.parts[id].grid, this.parts[id].centerlineLocked);
+      }
       this.parts[id].paramValues = { ...entry.paramValues[id] };
       this.parts[id].proceduralElements = cloneProceduralElements(entry.proceduralElements[id]);
     }
     this.wheelStance = { ...entry.wheelStance };
+    if (entry.fixtures) {
+      this.fixtures = { ...entry.fixtures };
+    }
     this.tunnelSettings = { ...this.tunnelSettings, wheelStance: { ...this.wheelStance } };
   }
 
@@ -317,6 +383,86 @@ export class CarProjectStore {
     this.emit();
   }
 
+  public updatePartGridNode(
+    partId: PartId,
+    u: number,
+    v: number,
+    position: Vec3,
+    handleLevel: SculptHandleLevel = this.activeHandleLevel
+  ): void {
+    const part = this.parts[partId];
+    const lockCenter = part.centerlineLocked && u === 0;
+
+    let targetPos: Vec3 = {
+      x: lockCenter ? 0 : Math.max(0, position.x),
+      y: position.y,
+      z: position.z,
+    };
+
+    if (this.clampToFiaBox) {
+      targetPos = clampPointToLegalityBoxes(targetPos, part.legalityBoxes, lockCenter);
+    }
+
+    if (!part.cage) {
+      part.cage = createCageV2(part.grid, part.centerlineLocked);
+    }
+
+    if (handleLevel === 'macro') {
+      part.cage.macro[u][v] = { ...targetPos };
+      part.grid[u][v] = { ...targetPos };
+      this.baseGrids[partId][u][v] = { ...targetPos };
+
+      // Propagate across shared seams
+      const allCages: Partial<Record<PartId, CageV2>> = {};
+      for (const id of PART_ORDER) {
+        if (this.parts[id].cage) allCages[id] = this.parts[id].cage;
+      }
+      syncSharedSeamNodes(partId, u, v, targetPos, allCages, 'macro');
+
+      // Update grids and detail cages for all parts
+      for (const id of PART_ORDER) {
+        const c = this.parts[id].cage;
+        if (c) {
+          c.detail = interpolateMacroToDetail(
+            c.macro,
+            c.detailCols,
+            c.detailRows,
+            c.detailOffsets,
+            this.parts[id].centerlineLocked
+          );
+          this.parts[id].grid = c.macro;
+          this.baseGrids[id] = cloneGrid(c.macro);
+        }
+      }
+    } else {
+      // Detail handle level: calculate delta from interpolated macro
+      const macroInterp = interpolateMacroToDetail(
+        part.cage.macro,
+        part.cage.detailCols,
+        part.cage.detailRows,
+        undefined,
+        part.centerlineLocked
+      );
+      if (macroInterp[u] && macroInterp[u][v]) {
+        const basePt = macroInterp[u][v];
+        if (!part.cage.detailOffsets[u]) {
+          part.cage.detailOffsets[u] = [];
+        }
+        part.cage.detailOffsets[u][v] = {
+          x: targetPos.x - basePt.x,
+          y: targetPos.y - basePt.y,
+          z: targetPos.z - basePt.z,
+        };
+        part.cage.detail[u][v] = { ...targetPos };
+      }
+    }
+
+    if (this.autoUpdateCfdInSculpt) {
+      this.runCFD();
+    }
+    this.emit();
+  }
+
   public clampPartToLegality(partId: PartId): void {
     const part = this.parts[partId];
     for (let u = 0; u < part.cols; u++) {
@@ -328,6 +474,16 @@ export class CarProjectStore {
         );
       }
     }
+    if (part.cage) {
+      part.cage.macro = cloneGrid(part.grid);
+      part.cage.detail = interpolateMacroToDetail(
+        part.cage.macro,
+        part.cage.detailCols,
+        part.cage.detailRows,
+        part.cage.detailOffsets,
+        part.centerlineLocked
+      );
+    }
     this.baseGrids[partId] = cloneGrid(part.grid);
   }
 
@@ -336,6 +492,7 @@ export class CarProjectStore {
     const defaults = createBaselineParts();
     const defPart = defaults[this.activePartId];
     this.parts[this.activePartId].grid = cloneGrid(defPart.grid);
+    this.parts[this.activePartId].cage = cloneCageV2(FITTED_CAGES_V2[this.activePartId]);
     this.baseGrids[this.activePartId] = cloneGrid(defPart.grid);
     this.parts[this.activePartId].paramValues = { ...defPart.paramValues };
     this.parts[this.activePartId].proceduralElements = cloneProceduralElements(
@@ -351,6 +508,7 @@ export class CarProjectStore {
     const defaults = createBaselineParts();
     for (const id of PART_ORDER) {
       this.parts[id].grid = grids[id];
+      this.parts[id].cage = createCageV2(grids[id], this.parts[id].centerlineLocked);
       this.baseGrids[id] = cloneGrid(grids[id]);
       this.parts[id].paramValues = { ...defaults[id].paramValues };
       if (preset === 'baseline') {
@@ -390,21 +548,32 @@ export class CarProjectStore {
     );
   }
 
-  public captureSnapshot(name: string): CarDesignSnapshot {
+  public captureSnapshot(name: string): CarDesignSnapshotV2 {
     const paramValues = {} as Record<PartId, Record<string, number>>;
     const proceduralElements = {} as Record<PartId, ProceduralElementConfig[]>;
+    const cages = {} as Partial<Record<PartId, { macro: Vec3[][]; detailOffsets?: Vec3[][] }>>;
+
     for (const id of PART_ORDER) {
       paramValues[id] = { ...this.parts[id].paramValues };
       proceduralElements[id] = cloneProceduralElements(this.parts[id].proceduralElements);
+      if (this.parts[id].cage) {
+        cages[id] = {
+          macro: cloneGrid(this.parts[id].cage!.macro),
+          detailOffsets: cloneGrid(this.parts[id].cage!.detailOffsets),
+        };
+      }
     }
+
     return {
+      version: 2,
       name,
       createdAt: Date.now(),
       carModelId: this.carModelId,
-      parts: this.cloneAllGrids(),
+      cages,
       paramValues,
       proceduralElements,
       wheelStance: { ...this.wheelStance },
+      fixtures: { ...this.fixtures },
       summary: {
         cl: this.cfdResult.cl,
         cd: this.cfdResult.cd,
@@ -425,37 +594,87 @@ export class CarProjectStore {
     return JSON.stringify(this.captureSnapshot('Custom 2026 F1 Aero Package'), null, 2);
   }
 
-  public importDesignJson(rawJson: string): boolean {
+  public loadDesignSnapshot(snapshot: CarDesignSnapshotAny): boolean {
     try {
-      const parsed = JSON.parse(rawJson) as CarDesignSnapshot;
-      if (!parsed || !parsed.parts) return false;
       this.pushUndoCheckpoint();
-      for (const id of PART_ORDER) {
-        const incoming = parsed.parts[id];
-        const part = this.parts[id];
-        if (
-          Array.isArray(incoming) &&
-          incoming.length === part.cols &&
-          Array.isArray(incoming[0]) &&
-          incoming[0].length === part.rows
-        ) {
-          part.grid = cloneGrid(incoming);
-          this.baseGrids[id] = cloneGrid(incoming);
+
+      if ((snapshot as CarDesignSnapshotV2).version === 2) {
+        const snapV2 = snapshot as CarDesignSnapshotV2;
+        for (const id of PART_ORDER) {
+          const part = this.parts[id];
+          const cageData = snapV2.cages?.[id];
+          if (cageData && Array.isArray(cageData.macro)) {
+            part.grid = cloneGrid(cageData.macro);
+            this.baseGrids[id] = cloneGrid(cageData.macro);
+            part.cage = createCageV2(part.grid, part.centerlineLocked);
+            if (cageData.detailOffsets && Array.isArray(cageData.detailOffsets)) {
+              part.cage.detailOffsets = cloneGrid(cageData.detailOffsets);
+              part.cage.detail = interpolateMacroToDetail(
+                part.cage.macro,
+                part.cage.detailCols,
+                part.cage.detailRows,
+                part.cage.detailOffsets,
+                part.centerlineLocked
+              );
+            }
+          }
+          if (snapV2.paramValues?.[id]) {
+            part.paramValues = { ...part.paramValues, ...snapV2.paramValues[id] };
+          }
+          if (Array.isArray(snapV2.proceduralElements?.[id])) {
+            part.proceduralElements = cloneProceduralElements(snapV2.proceduralElements[id]!);
+          }
         }
-        if (parsed.paramValues?.[id]) {
-          part.paramValues = { ...part.paramValues, ...parsed.paramValues[id] };
+        if (snapV2.wheelStance) {
+          this.wheelStance = { ...DEFAULT_WHEEL_STANCE, ...snapV2.wheelStance };
+          this.tunnelSettings = { ...this.tunnelSettings, wheelStance: { ...this.wheelStance } };
         }
-        if (Array.isArray(parsed.proceduralElements?.[id])) {
-          part.proceduralElements = cloneProceduralElements(parsed.proceduralElements[id]!);
+        if (snapV2.fixtures) {
+          this.fixtures = { ...this.fixtures, ...snapV2.fixtures };
         }
+      } else {
+        // V1 snapshot transparent migration
+        const snapV1 = snapshot as CarDesignSnapshot;
+        if (!snapV1.parts) return false;
+        for (const id of PART_ORDER) {
+          const incoming = snapV1.parts[id];
+          const part = this.parts[id];
+          if (
+            Array.isArray(incoming) &&
+            incoming.length === part.cols &&
+            Array.isArray(incoming[0]) &&
+            incoming[0].length === part.rows
+          ) {
+            part.grid = cloneGrid(incoming);
+            this.baseGrids[id] = cloneGrid(incoming);
+            part.cage = createCageV2(part.grid, part.centerlineLocked);
+          }
+          if (snapV1.paramValues?.[id]) {
+            part.paramValues = { ...part.paramValues, ...snapV1.paramValues[id] };
+          }
+          if (Array.isArray(snapV1.proceduralElements?.[id])) {
+            part.proceduralElements = cloneProceduralElements(snapV1.proceduralElements[id]!);
+          }
+        }
+        if (snapV1.wheelStance) {
+          this.wheelStance = { ...DEFAULT_WHEEL_STANCE, ...snapV1.wheelStance };
+          this.tunnelSettings = { ...this.tunnelSettings, wheelStance: { ...this.wheelStance } };
+        }
+        this.migrationToast = 'Migrated legacy V1 design to V2 procedural cages';
       }
-      if (parsed.wheelStance) {
-        this.wheelStance = { ...DEFAULT_WHEEL_STANCE, ...parsed.wheelStance };
-        this.tunnelSettings = { ...this.tunnelSettings, wheelStance: { ...this.wheelStance } };
-      }
+
       this.runCFD();
       this.emit();
       return true;
+    } catch {
+      return false;
+    }
+  }
+
+  public importDesignJson(rawJson: string): boolean {
+    try {
+      const parsed = JSON.parse(rawJson) as CarDesignSnapshotAny;
+      return this.loadDesignSnapshot(parsed);
     } catch {
       return false;
     }

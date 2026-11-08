@@ -9,9 +9,15 @@ This document tracks completed milestones and the planned progression from a pur
 - [x] **Phase 1 — Interactive 3D Aero Sandbox & Wind Tunnel MVP:**
   - Independent part sculpting with symmetric control lattices, FIA legality box clamping, real-time 3D CFD wake grid, RK2 streamlines, wake slice plane, and engineering telemetry HUD.
 - [x] **Phase 2 — Official FIA 2026 Models, Welded 3D FFD & Issue 8 Regulations:**
-  - Async GLB/GLTF pipeline loading the **Official FIA 2026 Concept** (default) and **Ferrari SF-26** (switchable with UV texture color baking).
   - Exact **FIA 2026 Issue 8 Appendix 1 Reference Volumes (`RV-*`)** with tapered frustums and front-wheel cutouts across all 7 Art. 3 components (`front_wing`, `nosecone`, `floor_boards`, `floor`, `sidepods`, `diffuser`, `rear_wing`).
   - Welded Shepard-Gaussian 3D FFD with monocoque seam pinning, real deformed mesh macro-panel CFD extraction, **Z-Mode / X-Mode 2026 Active Aerodynamics**, and smooth **WASD + Arrow** 3D camera flight.
+- [x] **Phase 2.5 — 100% Procedural Parts-First Car Architecture Overhaul:**
+  - Replaced polygon GLB meshes with 100% procedural B-spline/NURBS control lattices (`CageV2`) across all 11 FIA 2026 car parts.
+  - Welded 5 physical shared boundary seams with exact 0.000000 mm gap and zero detachment.
+  - Implemented two-tier adaptive LOD pipeline: Preview LOD (< 15 ms, ~31k tris) during gizmo dragging, and Full LOD (~100 ms, ~994k tris) offloaded to a dedicated WebWorker.
+  - Added 10 procedural vehicle fixtures (wheels, halo, mirrors, helmet, cockpit, exhaust) and UV-anchored appendages.
+  - Recalibrated coupled CFD solver with single-skin planform aerodynamic area extraction and optimized space-marching wake turnaround (~19–38 ms).
+  - Upgraded Studio HUD V2 with Macro/Detail handle level toggles (`M`), WebWorker LOD status badge, V1->V2 migration notice toast, and vehicle fixtures control panel.
 
 ---
 

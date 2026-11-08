@@ -9,9 +9,16 @@ This file is the canonical technical briefing for AI coding agents working in th
 **F1 2026 Aero Development & CFD Lab** is a browser-based 3D Formula 1 aerodynamic engineering and wind-tunnel game built with **Three.js (`^0.174.0`)**, **TypeScript (`^5.7.3`)**, and **Vite (`^6.2.0`)** using zero external UI frameworks.
 
 ### What Is Implemented & Working Today
-- **Authentic 2026 3D Base Car (`src/geometry/CarModelLoader.ts`):**
-  - Default car: **Official FIA 2026 Concept** (`/f1_2026_concept_polygon_model.glb`).
-  - Automatic triangle-level spatial classification into **4 spinning wheels** (with live camber/toe/track/rim-dish stance pivots), **static internal cockpit / steering / driver assembly**, and **11 independent deformable FIA 2026 aerodynamic, chassis, and suspension components**, plus a lightweight procedural fallback (`referenceChassis.ts` + `splineSurface.ts`) shown only during the initial ~250 ms GLB stream.
+- **100% Procedural Parts-First 2026 Formula 1 Car (`src/surface/PatchEvaluator.ts`, `src/regulations/fia2026.ts`):**
+  - **Zero GLB Runtime Dependencies:** 100% procedurally generated from mathematical control lattices (`CageV2`) with zero external polygon meshes or GLTF loading delays.
+  - **5 Physical Shared Seams Welded to Exact 0.000000 mm Gap:** Continuous C0 boundary contact across adjacent assemblies (`RV-FW` ↔ `RV-NOSE`, `RV-NOSE` ↔ `RV-CHASSIS`, `RV-CHASSIS` ↔ `RV-EC`, `RV-CHASSIS` ↔ `RV-FLOOR-BIB`, `RV-FLOOR` ↔ `RV-DIFFUSER`).
+  - **Two-Tier Control Cages (`CageV2`):** Macro level (coarse engineering handles) and Detail level (dense evaluation handles) with seam synchronization and anti-fold normal protection (`src/editor/constraints.ts`).
+- **Two-Tier Adaptive LOD Pipeline (`src/surface/lod.ts`, `src/surface/surfaceWorker.ts`):**
+  - **Preview LOD (~31k Triangles, < 15 ms):** Synchronous, zero-allocation main-thread bicubic Catmull-Rom patch tessellation providing fluid 60 FPS feedback during interactive 3D gizmo drags.
+  - **Full LOD (~994k Triangles, ~100 ms):** Dedicated WebWorker offloading high-density production tessellation with zero-copy transferable `ArrayBuffer`s, complete with real-time HUD worker status pill.
+- **Procedural Vehicle Fixtures & UV-Anchored Appendages (`src/geometry/fixtures.ts`, `src/geometry/proceduralElements.ts`):**
+  - **10 Vehicle Fixtures:** 4 spinning wheels (live stance pivots for camber, toe, track offset, rim dish), titanium Halo structure, rearview mirrors, driver helmet & visor, cockpit interior, and exhaust tailpipe, all toggleable via the Studio HUD.
+  - **UV-Anchored 3D Appendages:** Diveplanes, Gurney flaps, brake-duct winglets, vortex fences, cooling louvers, sharkfin extensions, and diffuser strakes evaluated in local orthogonal surface frames `(origin, tangentU, tangentV, normal)` riding seamlessly on bodywork deformation.
 - **11 Independently Deformable FIA 2026 Full-Car Components (`PART_ORDER`):**
   1. `front_wing` — Front Wing, Endplate & Footplate (`aero`, `Art. 3.10`, `RV-FW` + `RV-FWEP`)
   2. `nosecone` — Nosecone, Cape & Wing Pylons (`aero`, `Art. 3.7.1`, `RV-NOSE` + `RV-FW-PYLON`)
@@ -24,24 +31,16 @@ This file is the canonical technical briefing for AI coding agents working in th
   9. `rear_suspension` — Rear Suspension & Brake Ducts (`suspension`, `Art. 3.13 / 10`, `RV-RBD`)
   10. `diffuser` — Rear Diffuser & Boat-Tail (`aero`, `Art. 3.5.1 / 3.9`, `RV-FLOOR-BODY` + `RV-TAIL`)
   11. `rear_wing` — Beamless 3-Element Active Rear Wing (`aero`, `Art. 3.11`, `RV-RW` + `RV-RWEP` + `RV-RW-PYLON`)
-- **Real-Time Welded 3D FFD Sculpting, Sub-Zones, Parametric Sliders & Procedural Appendages (`src/geometry/ffdDeformer.ts`, `src/editor/PartSculptor.ts`):**
-  - Welded dynamic `BufferGeometry` per part driven by a `+X` half-car `[u][v]` control lattice (`AeroPartData.grid`) using precomputed **top-6 smooth Shepard-Gaussian weights** (`< 8 ms` live deform on the largest mesh).
-  - Symmetric bilateral deformation across `X = 0` (`u = 0` locked to `X = 0` when `centerlineLocked = true`) and smooth `seamPinFactor` feathering at chassis junctions so bodywork never tears.
-  - **Component Sub-Zones (`PartSubZone`):** Named functional sub-regions per part (e.g., `Inboard Spoon`, `Active Upper Flaps`, `Endplate & Footplate`) selectable via HUD chips or the `sub_zone` selection target.
-  - **Parametric Macro Shaping Sliders (`PartParamSlider`):** Engineering sliders (`pitchDeg`, `camberMm`, `flareMm`, `heightMm`) applying smooth macro AoA, camber arch, spanwise outwash flare, and height offsets onto the base lattice (`applyParametricOffsetsToGrid`).
-  - **Configurable 3D Procedural Aero Appendages (`ProceduralElementConfig`):** Toggleable, pitchable, scalable, and multi-count 3D appendages (diveplanes, Gurney flaps, brake-duct winglets, vortex fences, cooling louvers, sharkfin extensions, diffuser strakes) welded into the part's FFD & CFD pipeline.
-  - **4-Wheel & Axle Stance (`WheelStanceSettings`):** Live front/rear track offset, camber, front toe-in/out, and rim cover dish depth coupled into 3D wheel assemblies and CFD tire wake.
-  - 5 selection targets (`node`, `span_rib`, `chord_edge`, `sub_zone`, `whole_part`), 2 gizmo modes (`translate` = Bend/Move, `rotate` = Twist/Pitch), raised-cosine soft-falloff radius, and 40-step Undo/Redo + JSON design export/import.
 - **Official FIA 2026 Issue 8 Appendix 1 Legality Boxes (`src/regulations/fia2026.ts`, `src/editor/LegalityVisualizer.ts`):**
   - Tapered 3D frustum Reference Volumes (`LegalityBox`) with sloped vertical & lateral planes and cylindrical wheel-clearance cutouts (`RV-FWEP`).
-  - Live surface clamping (`clampPointToLegalityBoxes`) and real-mesh vertex scrutineering (`oobVerts === 0` across all 11 parts at baseline).
+  - Live surface clamping (`clampPointToLegalityBoxes`) and vertex scrutineering (`oobVerts === 0` across all 11 parts at baseline).
 - **Coupled 3D Wind-Tunnel CFD & 2026 Active Aerodynamics (`src/cfd/CFDSolver.ts`, `src/cfd/CFDVisualizer.ts`):**
-  - Extracts real area-weighted `MacroAeroPanel` patches (`cx, cy, cz, nx, ny, nz, area, su, sv`) directly from the deformed 3D car meshes across all 11 parts + procedural appendages.
+  - Extracts single-skin area-weighted `MacroAeroPanel` patches (`cx, cy, cz, nx, ny, nz, area, su, sv`) directly from deformed 3D car meshes across all 11 parts + procedural appendages.
   - Models **2026 Active Aerodynamics** (`z_mode` high-downforce cornering vs `x_mode` low-drag straight-line flap flattening on `front_wing` & `rear_wing`), ride-height/rake pitch sensitivity, crosswind yaw, wheel stance tire-wake coupling, Venturi floor throat/diffuser ground effect + stall, front-wing/floor-board tire wake outwash, and upstream-to-downstream wake blanking.
-  - Space-marches a `34 × 20 × 60` 3D grid (`vx, vy, vz, cp, turbulence, solid`) driving animated RK2 streamlines, smoke particles, a movable 2D cross-section wake contour slice, surface `Cp` / `Stall` vertex shaders, telemetry KPIs (`CL`, `CD`, `L/D`, `CoP % Front`, 2026 `750 kW` top speed, 240 km/h cornering G), and an actionable Engineering Diagnostics Advisor.
-  - **Calibrated Baseline Benchmarks (250 km/h, 0 mm RH, 0° Yaw, FIA 2026 Concept):**
-    - `Z-Mode`: `CL ≈ 3.750`, `CD ≈ 0.994`, `L/D ≈ 3.77`, `CoP ≈ 45.8% Front` (inside ideal `44.0%–47.5%` window).
-    - `X-Mode`: `CL ≈ 3.166`, `CD ≈ 0.706`, `L/D ≈ 4.48`, `CoP ≈ 47.3% Front`, `Top Speed ≈ 370 km/h`.
+  - Space-marches a `34 × 20 × 60` 3D grid (`vx, vy, vz, cp, turbulence, solid`) in ~19–38 ms driving animated RK2 streamlines, smoke particles, a movable 2D cross-section wake contour slice, surface `Cp` / `Stall` vertex shaders, telemetry KPIs (`CL`, `CD`, `L/D`, `CoP % Front`, 2026 `750 kW` top speed, 240 km/h cornering G), and an actionable Engineering Diagnostics Advisor.
+  - **Calibrated Baseline Benchmarks (250 km/h, 0 mm RH, 0° Yaw, Procedural 2026 Car):**
+    - `Z-Mode`: `CL ≈ 3.769`, `CD ≈ 0.994`, `L/D ≈ 3.79`, `CoP ≈ 45.7% Front` (inside ideal `44.0%–47.5%` window).
+    - `X-Mode`: `CL ≈ 3.112`, `CD ≈ 0.729`, `L/D ≈ 4.27`, `CoP ≈ 47.0% Front`, `Top Speed ≈ 366.4 km/h`.
 
 ---
 
@@ -67,30 +66,35 @@ f1-aero-lab/
 │   ├── main.ts                       # Bootstraps CarProjectStore -> SceneManager -> HudController
 │   ├── style.css                     # Studio HUD layout, glassmorphism panels, telemetry & KPI styles
 │   ├── types/
-│   │   └── aero.ts                   # All shared TypeScript interfaces, 11 PartIds, SubZones, Stance, CFDResult
+│   │   └── aero.ts                   # All shared TypeScript interfaces, 11 PartIds, CageV2, SubZones, Stance, CFDResult
 │   ├── regulations/
-│   │   └── fia2026.ts                # FIA <-> World transforms, 11-part RV-* boxes, grids, sliders & legality
+│   │   └── fia2026.ts                # FIA <-> World transforms, 11-part RV-* boxes, fitted cages, seam links & legality
 │   ├── state/
-│   │   └── CarProjectStore.ts        # Reactive pub/sub state store, undo/redo, presets, JSON save/load
+│   │   └── CarProjectStore.ts        # Reactive pub/sub state store, undo/redo, presets, V1->V2 migration, JSON save/load
+│   ├── surface/
+│   │   ├── PatchEvaluator.ts         # Catmull-Rom bicubic surface tessellator, planform area & legality extraction
+│   │   ├── surfaceWorker.ts          # Dedicated WebWorker for high-density Full LOD tessellation
+│   │   ├── surfaceMath.ts            # Fast matrix inversion, bicubic weights & surface evaluation math
+│   │   ├── surfaceTypes.ts           # Worker request/response messaging and transfer buffer interfaces
+│   │   └── lod.ts                    # LODManager orchestrating preview LOD (main thread) & full LOD (worker)
 │   ├── geometry/
-│   │   ├── CarModelLoader.ts         # Async GLB loader, 11-part FIA RV segmentation, wheel stance pivots
-│   │   ├── ffdDeformer.ts            # PartFFDController: top-6 Shepard-Gaussian 3D FFD, X-Mode deflection, Cp colors
-│   │   ├── splineSurface.ts          # Catmull-Rom fallback surface & Cp/separation colormap helpers (cpToRgb)
-│   │   └── referenceChassis.ts       # Lightweight procedural chassis shown during initial GLB stream
+│   │   ├── fixtures.ts               # ProceduralFixturesManager: 4 wheels + 6 static vehicle fixtures
+│   │   ├── proceduralElements.ts     # UV-anchored 3D appendages riding parent surface frames
+│   │   └── splineSurface.ts          # Fallback spline surface & Cp/separation colormap helpers (cpToRgb)
 │   ├── cfd/
 │   │   ├── CFDSolver.ts              # Coupled 11-part macro-panel aero physics + 34x20x60 semi-Lagrangian wake solver
 │   │   └── CFDVisualizer.ts          # 3D RK2 streamlines, animated flow particles, 2D wake contour slice plane
 │   ├── editor/
-│   │   ├── SceneManager.ts           # Three.js WebGL scene, lighting, OrbitControls, WASD/Arrow cam
-│   │   ├── PartSculptor.ts           # 3D FFD lattice handles, TransformControls gizmo, soft-falloff sculpting
+│   │   ├── SceneManager.ts           # Three.js WebGL scene, lighting, OrbitControls, WASD/Arrow cam, LOD wiring
+│   │   ├── PartSculptor.ts           # Two-tier cage handles (macro/detail), TransformControls gizmo, soft falloff
+│   │   ├── constraints.ts            # Anti-fold normal dot-product validation & hardpoint locks
 │   │   └── LegalityVisualizer.ts     # 3D CAD wireframe rendering of FIA Reference Volumes (cyan=OK, red=illegal)
 │   └── ui/
-│       └── HudController.ts          # Categorized 11-part Studio HUD, Sub-Zone chips, sliders, telemetry, hotkeys
+│       └── HudController.ts          # Studio HUD V2, handle level toggle, LOD badge, migration toast, telemetry, hotkeys
 ├── public/
-│   ├── f1_2026_concept_polygon_model.glb                             # Official FIA 2026 Concept 3D mesh
 │   └── fia_2026_formula_1_technical_regulations_issue_8_-_2024-06-24.pdf  # Official FIA 2026 Issue 8 PDF
 ├── docs/
-│   ├── ARCHITECTURE.md               # Deep dive: data flow, GLB segmentation, FFD math, performance budgets
+│   ├── ARCHITECTURE.md               # Deep dive: procedural pipeline, Catmull-Rom patch math, WebWorker LOD
 │   ├── CFD_AND_REGULATIONS.md        # Deep dive: FIA 2026 RV-* boxes, CFD equations, calibration targets
 │   └── ROADMAP.md                    # Planned gameplay & simulation phases
 └── .agents/skills/                   # On-demand procedural runbooks for AI agents
@@ -109,13 +113,13 @@ npm run preview      # Preview production build locally
 
 ### Mandatory Pre-Completion Checks
 1. **Always run `npm run build`** after any TypeScript or CSS change. `tsconfig.json` enforces `strict: true`, `noUnusedLocals: true`, `noUnusedParameters: true`, and `noFallthroughCasesInSwitch: true` — unused variables or implicit `any` will fail the build.
-2. **Preserve Baseline FIA Compliance:** Any change to `src/regulations/fia2026.ts` or `src/geometry/CarModelLoader.ts` must keep `cfdResult.allLegal === true` (`outOfBoundsMeshVertices === 0` across all 11 parts) for the unmodified baseline model.
+2. **Preserve Baseline FIA Compliance:** Any change to `src/regulations/fia2026.ts` or `src/surface/PatchEvaluator.ts` must keep `cfdResult.allLegal === true` (`outOfBoundsMeshVertices === 0` across all 11 parts) for the unmodified baseline model.
 3. **Protect Interactive Frame Budgets:**
-   - `PartFFDController.deform()` runs on pointer-move during gizmo drags — avoid heap allocations inside vertex loops (`Float32Array` / `Uint32Array` only; keep single-part deform `< 10 ms`).
-   - `runCFDSimulation()` runs synchronously on throttled gizmo drags and slider inputs — keep full solve `< 25 ms`.
+   - `PatchEvaluator.evaluatePartSurface()` runs on pointer-move during gizmo drags for Preview LOD — keep main-thread single-part preview update `< 5 ms` (full car `< 15 ms`).
+   - `runCFDSimulation()` runs synchronously on throttled gizmo drags and slider inputs — keep full solve `< 25 ms` (warmed up: ~19–38 ms).
 4. **Respect Keyboard Shortcut Allocation:**
    - **Camera Navigation (`SceneManager.ts`):** `W/A/S/D` & `ArrowUp/Left/Down/Right` (horizontal glide), `E`/`PageUp` (up), `Q`/`PageDown` (down), `Shift` (fast sprint). Never bind `W`, `A`, `S`, `D`, `Q`, or `E` to non-camera actions.
-   - **Editor & Tunnel Shortcuts (`HudController.ts`):** `G` (Bend/Move gizmo), `R` (Twist/Pitch gizmo), `1–9`, `0`, `-` (select parts `1–11`), `F` (focus active part), `Tab` (toggle Sculpt / Wind Tunnel), `X` (toggle Z-Mode / X-Mode Active Aero), `Ctrl+Z` / `Ctrl+Y` (Undo/Redo).
+   - **Editor & Tunnel Shortcuts (`HudController.ts`):** `G` (Bend/Move gizmo), `R` (Twist/Pitch gizmo), `M` (Toggle Macro / Detail handle level), `1–9`, `0`, `-` (select parts `1–11`), `F` (focus active part), `Tab` (toggle Sculpt / Wind Tunnel), `X` (toggle Z-Mode / X-Mode Active Aero), `Ctrl+Z` / `Ctrl+Y` (Undo/Redo).
 
 ---
 

@@ -6,7 +6,7 @@ import {
   signedMarginInUnion,
   worldToFiaMm,
 } from '../regulations/fia2026';
-import { AeroPartData, CarModelId, PartId } from '../types/aero';
+import { AeroPartData, CarModelId, PartId, WheelStanceSettings } from '../types/aero';
 import { PartFFDController } from './ffdDeformer';
 
 export interface LoadedCarAssembly {
@@ -15,10 +15,11 @@ export interface LoadedCarAssembly {
   staticChassisGroup: THREE.Group;
   /** 4 wheel pivot groups positioned at exact axle centers for Wind Tunnel rotation */
   wheelGroups: THREE.Group[];
-  /** 7 welded 3D FFD controllers for each FIA 2026 aerodynamic bodywork part */
+  /** 11 welded 3D FFD controllers for each FIA 2026 aerodynamic & chassis part */
   partControllers: Record<PartId, PartFFDController>;
   setGhostMode: (ghost: boolean) => void;
   updateWheelSpin: (dt: number, windSpeedKmh: number, active: boolean) => void;
+  applyWheelStance?: (stance: WheelStanceSettings) => void;
   dispose: () => void;
 }
 

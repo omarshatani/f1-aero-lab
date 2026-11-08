@@ -636,4 +636,6 @@ export class PartFFDController {
   public dispose(): void {
     this.geometry.dispose();
   }
+
+  public syncProceduralGeometry?(part: AeroPartData): boolean;
 }

@@ -1,9 +1,12 @@
 import { runCFDSimulation } from '../cfd/CFDSolver';
 import {
+  applyParametricOffsetsToGrid,
   clampPointToLegalityBoxes,
   cloneGrid,
+  cloneProceduralElements,
   createBaselineParts,
   createPresetGrids,
+  DEFAULT_WHEEL_STANCE,
   PART_ORDER,
 } from '../regulations/fia2026';
 import {
@@ -14,11 +17,14 @@ import {
   CFDResult,
   MacroAeroPanel,
   NodeIndex,
+  PartCategory,
   PartId,
+  ProceduralElementConfig,
   SculptSelectMode,
   SurfaceVizMode,
   TunnelSettings,
   Vec3,
+  WheelStanceSettings,
 } from '../types/aero';
 
 type Listener = () => void;
@@ -26,6 +32,13 @@ type Listener = () => void;
 export interface MeshCFDData {
   panels: Partial<Record<PartId, MacroAeroPanel[]>>;
   legalityPts: Partial<Record<PartId, Vec3[]>>;
+}
+
+interface UndoEntry {
+  grids: Record<PartId, Vec3[][]>;
+  paramValues: Record<PartId, Record<string, number>>;
+  proceduralElements: Record<PartId, ProceduralElementConfig[]>;
+  wheelStance: WheelStanceSettings;
 }
 
 export class CarProjectStore {
@@ -37,7 +50,12 @@ export class CarProjectStore {
   };
 
   public parts: Record<PartId, AeroPartData> = createBaselineParts();
+  /** Unmodified manual base grids before parametric slider macro offsets */
+  private baseGrids: Record<PartId, Vec3[][]>;
+
+  public activeCategory: 'all' | PartCategory = 'all';
   public activePartId: PartId = 'front_wing';
+  public activeSubZoneId = 'all';
   public selectedNode: NodeIndex = { u: 2, v: 3 };
 
   public appMode: AppMode = 'sculpt';
@@ -51,23 +69,27 @@ export class CarProjectStore {
   public surfaceVizMode: SurfaceVizMode = 'carbon';
   public autoUpdateCfdInSculpt = true;
 
+  public wheelStance: WheelStanceSettings = { ...DEFAULT_WHEEL_STANCE };
+
   public tunnelSettings: TunnelSettings = {
     windSpeedKmh: 250,
     frontRideHeightMm: 0,
     rearRideHeightMm: 0,
     yawAngleDeg: 0,
     activeAeroMode: 'z_mode',
+    wheelStance: { ...DEFAULT_WHEEL_STANCE },
   };
 
   public cfdResult: CFDResult;
   public baselineSnapshot: CarDesignSnapshot;
 
   private meshDataProvider: (() => MeshCFDData | null) | null = null;
-  private undoStack: Array<Record<PartId, Vec3[][]>> = [];
-  private redoStack: Array<Record<PartId, Vec3[][]>> = [];
+  private undoStack: UndoEntry[] = [];
+  private redoStack: UndoEntry[] = [];
   private listeners = new Set<Listener>();
 
   constructor() {
+    this.baseGrids = this.cloneAllGrids();
     this.cfdResult = runCFDSimulation(this.parts, this.tunnelSettings);
     this.baselineSnapshot = this.captureSnapshot('FIA 2026 Baseline Spec');
   }
@@ -106,8 +128,34 @@ export class CarProjectStore {
     return res;
   }
 
+  private captureUndoEntry(): UndoEntry {
+    const paramValues = {} as Record<PartId, Record<string, number>>;
+    const proceduralElements = {} as Record<PartId, ProceduralElementConfig[]>;
+    for (const id of PART_ORDER) {
+      paramValues[id] = { ...this.parts[id].paramValues };
+      proceduralElements[id] = cloneProceduralElements(this.parts[id].proceduralElements);
+    }
+    return {
+      grids: this.cloneAllGrids(),
+      paramValues,
+      proceduralElements,
+      wheelStance: { ...this.wheelStance },
+    };
+  }
+
+  private restoreUndoEntry(entry: UndoEntry): void {
+    for (const id of PART_ORDER) {
+      this.parts[id].grid = cloneGrid(entry.grids[id]);
+      this.baseGrids[id] = cloneGrid(entry.grids[id]);
+      this.parts[id].paramValues = { ...entry.paramValues[id] };
+      this.parts[id].proceduralElements = cloneProceduralElements(entry.proceduralElements[id]);
+    }
+    this.wheelStance = { ...entry.wheelStance };
+    this.tunnelSettings = { ...this.tunnelSettings, wheelStance: { ...this.wheelStance } };
+  }
+
   public pushUndoCheckpoint(): void {
-    this.undoStack.push(this.cloneAllGrids());
+    this.undoStack.push(this.captureUndoEntry());
     if (this.undoStack.length > 40) {
       this.undoStack.shift();
     }
@@ -125,10 +173,8 @@ export class CarProjectStore {
   public undo(): void {
     const prev = this.undoStack.pop();
     if (!prev) return;
-    this.redoStack.push(this.cloneAllGrids());
-    for (const id of PART_ORDER) {
-      this.parts[id].grid = prev[id];
-    }
+    this.redoStack.push(this.captureUndoEntry());
+    this.restoreUndoEntry(prev);
     this.runCFD();
     this.emit();
   }
@@ -136,10 +182,8 @@ export class CarProjectStore {
   public redo(): void {
     const next = this.redoStack.pop();
     if (!next) return;
-    this.undoStack.push(this.cloneAllGrids());
-    for (const id of PART_ORDER) {
-      this.parts[id].grid = next[id];
-    }
+    this.undoStack.push(this.captureUndoEntry());
+    this.restoreUndoEntry(next);
     this.runCFD();
     this.emit();
   }
@@ -148,14 +192,50 @@ export class CarProjectStore {
     return this.parts[this.activePartId];
   }
 
+  public setActiveCategory(cat: 'all' | PartCategory): void {
+    this.activeCategory = cat;
+    if (cat !== 'all' && this.parts[this.activePartId].category !== cat) {
+      const firstMatch = PART_ORDER.find((id) => this.parts[id].category === cat);
+      if (firstMatch) {
+        this.setActivePart(firstMatch);
+        return;
+      }
+    }
+    this.emit();
+  }
+
   public setActivePart(partId: PartId): void {
     if (this.activePartId === partId) return;
     this.activePartId = partId;
+    this.activeSubZoneId = 'all';
+    if (this.selectMode === 'sub_zone') {
+      this.selectMode = 'node';
+    }
     const p = this.parts[partId];
     this.selectedNode = {
       u: Math.min(p.cols - 1, Math.floor(p.cols / 2)),
       v: p.rows - 1,
     };
+    this.emit();
+  }
+
+  public setActiveSubZone(zoneId: string): void {
+    this.activeSubZoneId = zoneId;
+    const p = this.getActivePart();
+    if (zoneId === 'all') {
+      if (this.selectMode === 'sub_zone') {
+        this.selectMode = 'node';
+      }
+    } else {
+      const z = p.subZones.find((s) => s.id === zoneId);
+      if (z && z.uIndices.length > 0 && z.vIndices.length > 0) {
+        this.selectedNode = {
+          u: z.uIndices[Math.floor(z.uIndices.length / 2)],
+          v: z.vIndices[Math.floor(z.vIndices.length / 2)],
+        };
+        this.selectMode = 'sub_zone';
+      }
+    }
     this.emit();
   }
 
@@ -166,6 +246,50 @@ export class CarProjectStore {
       v: Math.max(0, Math.min(p.rows - 1, node.v)),
     };
     this.emit();
+  }
+
+  public setPartParamValue(partId: PartId, paramId: string, value: number): void {
+    const part = this.parts[partId];
+    part.paramValues[paramId] = value;
+    part.grid = applyParametricOffsetsToGrid(
+      this.baseGrids[partId],
+      part,
+      part.paramValues,
+      this.clampToFiaBox
+    );
+    this.runCFD();
+    this.emit();
+  }
+
+  public syncBaseGridFromCurrent(partId: PartId): void {
+    this.baseGrids[partId] = cloneGrid(this.parts[partId].grid);
+    for (const s of this.parts[partId].paramSliders) {
+      this.parts[partId].paramValues[s.id] = s.defaultValue;
+    }
+  }
+
+  public setProceduralElementConfig(
+    partId: PartId,
+    elementId: string,
+    patch: Partial<ProceduralElementConfig>
+  ): void {
+    const part = this.parts[partId];
+    const idx = part.proceduralElements.findIndex((el) => el.id === elementId);
+    if (idx < 0) return;
+    part.proceduralElements[idx] = { ...part.proceduralElements[idx], ...patch };
+    this.runCFD();
+    this.emit();
+  }
+
+  public updateWheelStance(patch: Partial<WheelStanceSettings>): void {
+    this.wheelStance = { ...this.wheelStance, ...patch };
+    this.tunnelSettings = { ...this.tunnelSettings, wheelStance: { ...this.wheelStance } };
+    this.runCFD();
+    this.emit();
+  }
+
+  public resetWheelStance(): void {
+    this.updateWheelStance({ ...DEFAULT_WHEEL_STANCE });
   }
 
   public setAppMode(mode: AppMode): void {
@@ -204,12 +328,19 @@ export class CarProjectStore {
         );
       }
     }
+    this.baseGrids[partId] = cloneGrid(part.grid);
   }
 
   public resetActivePartToBaseline(): void {
     this.pushUndoCheckpoint();
     const defaults = createBaselineParts();
-    this.parts[this.activePartId].grid = cloneGrid(defaults[this.activePartId].grid);
+    const defPart = defaults[this.activePartId];
+    this.parts[this.activePartId].grid = cloneGrid(defPart.grid);
+    this.baseGrids[this.activePartId] = cloneGrid(defPart.grid);
+    this.parts[this.activePartId].paramValues = { ...defPart.paramValues };
+    this.parts[this.activePartId].proceduralElements = cloneProceduralElements(
+      defPart.proceduralElements
+    );
     this.runCFD();
     this.emit();
   }
@@ -217,15 +348,34 @@ export class CarProjectStore {
   public applyConceptPreset(preset: 'baseline' | 'high_downforce' | 'low_drag'): void {
     this.pushUndoCheckpoint();
     const grids = createPresetGrids(preset);
+    const defaults = createBaselineParts();
     for (const id of PART_ORDER) {
       this.parts[id].grid = grids[id];
+      this.baseGrids[id] = cloneGrid(grids[id]);
+      this.parts[id].paramValues = { ...defaults[id].paramValues };
+      if (preset === 'baseline') {
+        this.parts[id].proceduralElements = cloneProceduralElements(
+          defaults[id].proceduralElements
+        );
+      }
+    }
+    if (preset === 'baseline') {
+      this.wheelStance = { ...DEFAULT_WHEEL_STANCE };
+      this.tunnelSettings = { ...this.tunnelSettings, wheelStance: { ...this.wheelStance } };
     }
     this.runCFD();
     this.emit();
   }
 
   public updateTunnelSettings(patch: Partial<TunnelSettings>): void {
-    this.tunnelSettings = { ...this.tunnelSettings, ...patch };
+    this.tunnelSettings = {
+      ...this.tunnelSettings,
+      ...patch,
+      wheelStance: patch.wheelStance ? { ...patch.wheelStance } : { ...this.wheelStance },
+    };
+    if (patch.wheelStance) {
+      this.wheelStance = { ...patch.wheelStance };
+    }
     this.runCFD();
     this.emit();
   }
@@ -241,11 +391,20 @@ export class CarProjectStore {
   }
 
   public captureSnapshot(name: string): CarDesignSnapshot {
+    const paramValues = {} as Record<PartId, Record<string, number>>;
+    const proceduralElements = {} as Record<PartId, ProceduralElementConfig[]>;
+    for (const id of PART_ORDER) {
+      paramValues[id] = { ...this.parts[id].paramValues };
+      proceduralElements[id] = cloneProceduralElements(this.parts[id].proceduralElements);
+    }
     return {
       name,
       createdAt: Date.now(),
       carModelId: this.carModelId,
       parts: this.cloneAllGrids(),
+      paramValues,
+      proceduralElements,
+      wheelStance: { ...this.wheelStance },
       summary: {
         cl: this.cfdResult.cl,
         cd: this.cfdResult.cd,
@@ -271,12 +430,6 @@ export class CarProjectStore {
       const parsed = JSON.parse(rawJson) as CarDesignSnapshot;
       if (!parsed || !parsed.parts) return false;
       this.pushUndoCheckpoint();
-      if (
-        parsed.carModelId === 'fia_2026_concept' ||
-        parsed.carModelId === 'ferrari_sf26'
-      ) {
-        this.carModelId = parsed.carModelId;
-      }
       for (const id of PART_ORDER) {
         const incoming = parsed.parts[id];
         const part = this.parts[id];
@@ -287,7 +440,18 @@ export class CarProjectStore {
           incoming[0].length === part.rows
         ) {
           part.grid = cloneGrid(incoming);
+          this.baseGrids[id] = cloneGrid(incoming);
         }
+        if (parsed.paramValues?.[id]) {
+          part.paramValues = { ...part.paramValues, ...parsed.paramValues[id] };
+        }
+        if (Array.isArray(parsed.proceduralElements?.[id])) {
+          part.proceduralElements = cloneProceduralElements(parsed.proceduralElements[id]!);
+        }
+      }
+      if (parsed.wheelStance) {
+        this.wheelStance = { ...DEFAULT_WHEEL_STANCE, ...parsed.wheelStance };
+        this.tunnelSettings = { ...this.tunnelSettings, wheelStance: { ...this.wheelStance } };
       }
       this.runCFD();
       this.emit();

@@ -7,7 +7,7 @@ import {
   signedMarginInUnion,
 } from '../regulations/fia2026';
 import { CarProjectStore } from '../state/CarProjectStore';
-import { NodeIndex, PartId, Vec3 } from '../types/aero';
+import { AeroPartData, NodeIndex, PartId, PartSubZone, Vec3 } from '../types/aero';
 
 export class PartSculptor {
   public readonly root = new THREE.Group();
@@ -55,14 +55,15 @@ export class PartSculptor {
       this.isDraggingGizmo = dragging;
       this.orbitControls.enabled = !dragging;
 
+      const active = this.store.getActivePart();
       if (dragging) {
         this.store.pushUndoCheckpoint();
-        const active = this.store.getActivePart();
         this.dragStartGrid = cloneGrid(active.grid);
         this.dragStartAnchorPos.copy(this.proxyAnchor.position);
         this.dragStartAnchorQuat.copy(this.proxyAnchor.quaternion);
       } else {
         this.dragStartGrid = null;
+        this.store.syncBaseGridFromCurrent(active.id);
         this.store.runCFD();
         this.store.emit();
       }
@@ -92,10 +93,47 @@ export class PartSculptor {
     }
   }
 
+  private resolveActiveSubZone(part: AeroPartData): PartSubZone | undefined {
+    if (this.store.activeSubZoneId !== 'all') {
+      const found = part.subZones.find((z) => z.id === this.store.activeSubZoneId);
+      if (found) return found;
+    }
+    if (this.store.selectMode === 'sub_zone' && part.subZones.length > 0) {
+      const sel = this.store.selectedNode;
+      return (
+        part.subZones.find((z) => z.uIndices.includes(sel.u) && z.vIndices.includes(sel.v)) ??
+        part.subZones[0]
+      );
+    }
+    return undefined;
+  }
+
   private computeAnchorPosition(): THREE.Vector3 {
     const part = this.store.getActivePart();
     const sel = this.store.selectedNode;
     const mode = this.store.selectMode;
+
+    if (mode === 'sub_zone' || this.store.activeSubZoneId !== 'all') {
+      const zone = this.resolveActiveSubZone(part);
+      if (zone && zone.uIndices.length > 0 && zone.vIndices.length > 0) {
+        const acc = new THREE.Vector3();
+        let count = 0;
+        for (const u of zone.uIndices) {
+          if (u < 0 || u >= part.cols) continue;
+          for (const v of zone.vIndices) {
+            if (v < 0 || v >= part.rows) continue;
+            const p = part.grid[u][v];
+            acc.x += p.x;
+            acc.y += p.y;
+            acc.z += p.z;
+            count++;
+          }
+        }
+        if (count > 0) {
+          return acc.divideScalar(count);
+        }
+      }
+    }
 
     if (mode === 'node') {
       const p = part.grid[sel.u][sel.v];
@@ -125,6 +163,32 @@ export class PartSculptor {
     if (mode === 'whole_part') return 1.0;
     if (mode === 'span_rib') return u === sel.u ? 1.0 : 0.0;
     if (mode === 'chord_edge') return v === sel.v ? 1.0 : 0.0;
+
+    if (mode === 'sub_zone') {
+      const part = this.store.getActivePart();
+      const zone = this.resolveActiveSubZone(part);
+      if (zone) {
+        if (zone.uIndices.includes(u) && zone.vIndices.includes(v)) {
+          return 1.0;
+        }
+        const radius = this.store.softFalloffRadius;
+        if (radius <= 0.005) return 0.0;
+
+        const p = partGrid[u][v];
+        let minDist = Infinity;
+        for (const zu of zone.uIndices) {
+          if (zu < 0 || zu >= partGrid.length) continue;
+          for (const zv of zone.vIndices) {
+            if (zv < 0 || zv >= partGrid[zu].length) continue;
+            const zp = partGrid[zu][zv];
+            const d = Math.hypot(p.x - zp.x, p.y - zp.y, p.z - zp.z);
+            if (d < minDist) minDist = d;
+          }
+        }
+        if (minDist >= radius) return 0.0;
+        return 0.5 * (1 + Math.cos((Math.PI * minDist) / radius));
+      }
+    }
 
     // mode === 'node'
     if (u === sel.u && v === sel.v) return 1.0;
@@ -278,6 +342,10 @@ export class PartSculptor {
 
   public updateCageAndHandles(): void {
     const part = this.store.getActivePart();
+    const activeZone =
+      this.store.activeSubZoneId !== 'all'
+        ? part.subZones.find((z) => z.id === this.store.activeSubZoneId)
+        : undefined;
     let mirrorPtr = 0;
 
     for (let i = 0; i < this.handleMeshes.length; i++) {
@@ -287,15 +355,18 @@ export class PartSculptor {
       mesh.position.set(pt.x, pt.y, pt.z);
 
       const w = this.getNodeWeight(part.grid, u, v);
+      const inActiveZone = Boolean(
+        activeZone && activeZone.uIndices.includes(u) && activeZone.vIndices.includes(v)
+      );
       const isLegalNode = signedMarginInUnion(pt, part.legalityBoxes) >= -0.001;
       const mat = mesh.material as THREE.MeshBasicMaterial;
 
       if (!isLegalNode) {
         mat.color.setHex(0xef4444);
         mesh.scale.setScalar(1.25);
-      } else if (w >= 0.99) {
+      } else if (w >= 0.99 || inActiveZone) {
         mat.color.setHex(0xfacc15);
-        mesh.scale.setScalar(1.3);
+        mesh.scale.setScalar(w >= 0.99 ? 1.3 : 1.18);
       } else if (w > 0.02) {
         mat.color.setHex(0xfb923c);
         mesh.scale.setScalar(1.0 + 0.25 * w);

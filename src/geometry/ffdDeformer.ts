@@ -1,4 +1,8 @@
 import * as THREE from 'three';
+import {
+  buildProceduralElementsForPart,
+  computeProceduralSignature,
+} from './proceduralElements';
 import { cpToRgb, separationToRgb } from './splineSurface';
 import {
   clampPointToLegalityBoxes,
@@ -49,21 +53,27 @@ function bilinearSample(grid: number[][], su: number, sv: number): number {
 
 /**
  * High-performance 3D Cage / Smooth Shepard-Gaussian Free-Form Deformer (FFD)
- * bound directly to the real welded vertices of a 2026 F1 aerodynamic component mesh.
+ * bound directly to the real welded vertices of a 2026 F1 aerodynamic component mesh
+ * plus its spliced 3D procedural aerodynamic elements.
  */
 export class PartFFDController {
   public readonly partId: PartId;
   public readonly geometry: THREE.BufferGeometry;
-  public readonly vertexCount: number;
+  public vertexCount = 0;
 
-  private readonly restPositions: Float32Array;
-  private readonly restNormals: Float32Array;
-  private readonly restColors: Float32Array | null;
-  private readonly seamPinFactor: Float32Array;
-  private readonly restMargins: Float32Array;
-  private readonly vertexSu: Float32Array;
-  private readonly vertexSv: Float32Array;
-  private readonly centerlineFlags: Uint8Array;
+  private readonly baseRestPositions: Float32Array;
+  private readonly baseIndices: Uint32Array;
+  private readonly baseRestColors: Float32Array | null;
+  private lastProcSig = '__uninitialized__';
+
+  private restPositions!: Float32Array;
+  private restNormals!: Float32Array;
+  private restColors: Float32Array | null = null;
+  private seamPinFactor!: Float32Array;
+  private restMargins!: Float32Array;
+  private vertexSu!: Float32Array;
+  private vertexSv!: Float32Array;
+  private centerlineFlags!: Uint8Array;
 
   private readonly baselineGrid: Vec3[][];
   private readonly cols: number;
@@ -71,12 +81,15 @@ export class PartFFDController {
   private readonly restNodesX: Float32Array;
   private readonly restNodesY: Float32Array;
   private readonly restNodesZ: Float32Array;
+  private readonly invScaleX: number;
+  private readonly invScaleY: number;
+  private readonly invScaleZ: number;
 
-  private readonly weightNodeIdx: Uint8Array;
-  private readonly weightNodeVal: Float32Array;
+  private weightNodeIdx!: Uint8Array;
+  private weightNodeVal!: Float32Array;
 
-  private readonly repBins: RepBinEntry[] = [];
-  private readonly legalitySampleIndices: Uint32Array;
+  private repBins: RepBinEntry[] = [];
+  private legalitySampleIndices!: Uint32Array;
 
   private minAbsX = Infinity;
   private maxAbsX = -Infinity;
@@ -87,14 +100,13 @@ export class PartFFDController {
     baselinePart: AeroPartData,
     restPositions: Float32Array,
     indices: Uint32Array,
-    seamPinFactor: Float32Array,
+    _seamPinFactor: Float32Array,
     restColors: Float32Array | null = null
   ) {
     this.partId = baselinePart.id;
-    this.vertexCount = restPositions.length / 3;
-    this.restPositions = restPositions;
-    this.seamPinFactor = seamPinFactor;
-    this.restColors = restColors;
+    this.baseRestPositions = restPositions;
+    this.baseIndices = indices;
+    this.baseRestColors = restColors;
 
     this.cols = baselinePart.cols;
     this.rows = baselinePart.rows;
@@ -126,10 +138,78 @@ export class PartFFDController {
       }
     }
 
+    // Anisotropic kernel scales matching control lattice spacing so 3D features
+    // (e.g., sidepod undercut vs upper deck, wing cascade vs lower endplate) decouple cleanly
+    this.invScaleX = 1.0 / Math.max(0.11, ((gMaxX - gMinX) / Math.max(1, this.cols - 1)) * 0.95);
+    this.invScaleY = 1.0 / Math.max(0.10, (gMaxY - gMinY) * 0.45);
+    this.invScaleZ = 1.0 / Math.max(0.13, ((gMaxZ - gMinZ) / Math.max(1, this.rows - 1)) * 0.95);
+
+    this.geometry = new THREE.BufferGeometry();
+    this.syncProceduralGeometry(baselinePart);
+  }
+
+  /**
+   * Synchronize enabled 3D procedural aero elements into the welded part geometry,
+   * FFD weight tables, CFD macro-panel bins, and FIA legality sample points.
+   * Returns true if the procedural mesh was rebuilt, or false if unchanged.
+   */
+  public syncProceduralGeometry(part: AeroPartData): boolean {
+    const sig = computeProceduralSignature(part);
+    if (sig === this.lastProcSig) {
+      return false;
+    }
+    this.lastProcSig = sig;
+
+    const proc = buildProceduralElementsForPart(part);
+    const baseVertCount = this.baseRestPositions.length / 3;
+    const procVertCount = proc.positions.length / 3;
+    const totalVerts = baseVertCount + procVertCount;
+
+    let mergedPos: Float32Array;
+    let mergedIdx: Uint32Array;
+    let mergedCol: Float32Array | null = null;
+
+    if (procVertCount === 0) {
+      mergedPos = this.baseRestPositions;
+      mergedIdx = this.baseIndices;
+      mergedCol = this.baseRestColors;
+    } else {
+      mergedPos = new Float32Array(totalVerts * 3);
+      mergedPos.set(this.baseRestPositions, 0);
+      mergedPos.set(proc.positions, this.baseRestPositions.length);
+
+      mergedIdx = new Uint32Array(this.baseIndices.length + proc.indices.length);
+      mergedIdx.set(this.baseIndices, 0);
+      const idxOffset = this.baseIndices.length;
+      for (let i = 0; i < proc.indices.length; i++) {
+        mergedIdx[idxOffset + i] = proc.indices[i] + baseVertCount;
+      }
+
+      if (this.baseRestColors) {
+        mergedCol = new Float32Array(totalVerts * 3);
+        mergedCol.set(this.baseRestColors, 0);
+        for (let i = baseVertCount * 3; i < totalVerts * 3; i += 3) {
+          mergedCol[i] = 0.14;
+          mergedCol[i + 1] = 0.16;
+          mergedCol[i + 2] = 0.19;
+        }
+      }
+    }
+
+    this.vertexCount = totalVerts;
+    this.restPositions = mergedPos;
+    this.restColors = mergedCol;
+    this.seamPinFactor = new Float32Array(totalVerts);
+    this.seamPinFactor.fill(1.0);
+
     // Compute mesh bounds on +X
+    this.minAbsX = Infinity;
+    this.maxAbsX = -Infinity;
+    this.minZ = Infinity;
+    this.maxZ = -Infinity;
     for (let i = 0; i < this.vertexCount; i++) {
-      const ax = Math.abs(restPositions[i * 3]);
-      const z = restPositions[i * 3 + 2];
+      const ax = Math.abs(mergedPos[i * 3]);
+      const z = mergedPos[i * 3 + 2];
       if (ax < this.minAbsX) this.minAbsX = ax;
       if (ax > this.maxAbsX) this.maxAbsX = ax;
       if (z < this.minZ) this.minZ = z;
@@ -138,12 +218,7 @@ export class PartFFDController {
 
     const spanX = Math.max(0.08, this.maxAbsX - this.minAbsX);
     const spanZ = Math.max(0.12, this.maxZ - this.minZ);
-
-    // Anisotropic kernel scales matching control lattice spacing so 3D features
-    // (e.g., sidepod undercut vs upper deck, wing cascade vs lower endplate) decouple cleanly
-    const invScaleX = 1.0 / Math.max(0.11, (gMaxX - gMinX) / Math.max(1, this.cols - 1) * 0.95);
-    const invScaleY = 1.0 / Math.max(0.10, (gMaxY - gMinY) * 0.45);
-    const invScaleZ = 1.0 / Math.max(0.13, (gMaxZ - gMinZ) / Math.max(1, this.rows - 1) * 0.95);
+    const numNodes = this.cols * this.rows;
 
     this.weightNodeIdx = new Uint8Array(this.vertexCount * K_WEIGHTS);
     this.weightNodeVal = new Float32Array(this.vertexCount * K_WEIGHTS);
@@ -158,12 +233,12 @@ export class PartFFDController {
 
     for (let i = 0; i < this.vertexCount; i++) {
       const o = i * 3;
-      const x = restPositions[o];
+      const x = mergedPos[o];
       const ax = Math.abs(x);
-      const y = restPositions[o + 1];
-      const z = restPositions[o + 2];
+      const y = mergedPos[o + 1];
+      const z = mergedPos[o + 2];
 
-      if (baselinePart.centerlineLocked && ax < 0.0025) {
+      if (part.centerlineLocked && ax < 0.0025) {
         this.centerlineFlags[i] = 1;
       }
 
@@ -171,13 +246,13 @@ export class PartFFDController {
       this.vertexSv[i] = Math.max(0, Math.min(1, (z - this.minZ) / spanZ));
       this.restMargins[i] = signedMarginInUnion(
         { x: ax, y, z },
-        baselinePart.legalityBoxes
+        part.legalityBoxes
       );
 
       for (let m = 0; m < numNodes; m++) {
-        const dx = (ax - this.restNodesX[m]) * invScaleX;
-        const dy = (y - this.restNodesY[m]) * invScaleY;
-        const dz = (z - this.restNodesZ[m]) * invScaleZ;
+        const dx = (ax - this.restNodesX[m]) * this.invScaleX;
+        const dy = (y - this.restNodesY[m]) * this.invScaleY;
+        const dz = (z - this.restNodesZ[m]) * this.invScaleZ;
         tmpDist2[m] = dx * dx + dy * dy + dz * dz;
       }
 
@@ -212,18 +287,18 @@ export class PartFFDController {
       }
     }
 
-    // Build Three.js BufferGeometry with dynamic position/color/normal buffers
-    this.geometry = new THREE.BufferGeometry();
-    const livePos = new Float32Array(restPositions);
+    // Update Three.js BufferGeometry in-place with dynamic position/color/normal buffers
+    const livePos = new Float32Array(mergedPos);
     const liveCol = new Float32Array(this.vertexCount * 3);
     const posAttr = new THREE.BufferAttribute(livePos, 3);
     posAttr.setUsage(THREE.DynamicDrawUsage);
     const colAttr = new THREE.BufferAttribute(liveCol, 3);
     colAttr.setUsage(THREE.DynamicDrawUsage);
 
+    this.geometry.deleteAttribute('normal');
     this.geometry.setAttribute('position', posAttr);
     this.geometry.setAttribute('color', colAttr);
-    this.geometry.setIndex(new THREE.BufferAttribute(indices, 1));
+    this.geometry.setIndex(new THREE.BufferAttribute(mergedIdx, 1));
     this.geometry.computeVertexNormals();
     this.geometry.computeBoundingBox();
     this.geometry.computeBoundingSphere();
@@ -233,17 +308,20 @@ export class PartFFDController {
     this.restNormals = new Float32Array(normAttr.array as Float32Array);
 
     // Precompute area-weighted representative CFD macro-panels from +X mesh triangles
-    this.buildRepresentativePanels(indices, spanX, spanZ);
+    this.repBins = [];
+    this.buildRepresentativePanels(mergedIdx, spanX, spanZ);
 
-    // Precompute ~420 legality sample vertex indices on +X (where seamPinFactor > 0.35)
+    // Precompute ~420 legality sample vertex indices on +X
     const candidates: number[] = [];
     const step = Math.max(1, Math.floor(this.vertexCount / 900));
     for (let i = 0; i < this.vertexCount; i += step) {
-      if (restPositions[i * 3] >= -0.001 && seamPinFactor[i] > 0.35) {
+      if (mergedPos[i * 3] >= -0.001 && this.seamPinFactor[i] > 0.35) {
         candidates.push(i);
       }
     }
     this.legalitySampleIndices = new Uint32Array(candidates);
+
+    return true;
   }
 
   private buildRepresentativePanels(
@@ -494,7 +572,7 @@ export class PartFFDController {
 
     if (vizMode === 'carbon' || !cpMap) {
       if (this.restColors) {
-        // Authentic PBR / baked vertex colors (e.g. Ferrari SF-26 livery)
+        // Authentic PBR / baked vertex colors
         const boost = isSelectedPart ? 1.08 : 1.0;
         for (let i = 0; i < outCol.length; i++) {
           outCol[i] = Math.min(1, this.restColors[i] * boost);
@@ -636,6 +714,4 @@ export class PartFFDController {
   public dispose(): void {
     this.geometry.dispose();
   }
-
-  public syncProceduralGeometry?(part: AeroPartData): boolean;
 }

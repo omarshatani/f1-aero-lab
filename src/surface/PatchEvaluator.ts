@@ -1,95 +1,21 @@
 import * as THREE from 'three';
+import { buildProceduralElementsForPart } from '../geometry/proceduralElements';
 import { cpToRgb, separationToRgb } from '../geometry/splineSurface';
-import { AeroPartData, PartId, PartSurfaceCpMap, SurfaceVizMode, Vec3 } from '../types/aero';
+import {
+  ActiveAeroMode,
+  AeroPartData,
+  MacroAeroPanel,
+  PartId,
+  PartSurfaceCpMap,
+  SurfaceVizMode,
+  Vec3,
+} from '../types/aero';
+import {
+  bilinearLookup,
+  evalCurveAlongArray,
+  halfThicknessProfile,
+} from './surfaceMath';
 import { EvaluatedPartSurface, LODLevel } from './surfaceTypes';
-
-function catmullRomScalar(p0: number, p1: number, p2: number, p3: number, t: number): number {
-  const t2 = t * t;
-  const t3 = t2 * t;
-  return (
-    0.5 *
-    (2 * p1 +
-      (-p0 + p2) * t +
-      (2 * p0 - 5 * p1 + 4 * p2 - p3) * t2 +
-      (-p0 + 3 * p1 - 3 * p2 + p3) * t3)
-  );
-}
-
-function catmullRomVec3(p0: Vec3, p1: Vec3, p2: Vec3, p3: Vec3, t: number): Vec3 {
-  return {
-    x: catmullRomScalar(p0.x, p1.x, p2.x, p3.x, t),
-    y: catmullRomScalar(p0.y, p1.y, p2.y, p3.y, t),
-    z: catmullRomScalar(p0.z, p1.z, p2.z, p3.z, t),
-  };
-}
-
-function evalCurveAlongArray(pts: Vec3[], s: number, mirrorStartAcrossX = false): Vec3 {
-  const n = pts.length;
-  if (n === 1) return { ...pts[0] };
-  const scaled = Math.max(0, Math.min(1, s)) * (n - 1);
-  const idx = Math.min(n - 2, Math.floor(scaled));
-  const frac = scaled - idx;
-
-  const getPt = (i: number): Vec3 => {
-    if (i < 0) {
-      if (mirrorStartAcrossX && n > 1) {
-        return { x: -pts[1].x, y: pts[1].y, z: pts[1].z };
-      }
-      return {
-        x: 2 * pts[0].x - pts[1].x,
-        y: 2 * pts[0].y - pts[1].y,
-        z: 2 * pts[0].z - pts[1].z,
-      };
-    }
-    if (i >= n) {
-      return {
-        x: 2 * pts[n - 1].x - pts[n - 2].x,
-        y: 2 * pts[n - 1].y - pts[n - 2].y,
-        z: 2 * pts[n - 1].z - pts[n - 2].z,
-      };
-    }
-    return pts[i];
-  };
-
-  return catmullRomVec3(getPt(idx - 1), getPt(idx), getPt(idx + 1), getPt(idx + 2), frac);
-}
-
-function halfThicknessProfile(part: AeroPartData, sv: number, su: number): number {
-  const t = Math.max(0, Math.min(1, sv));
-  const halfMax = part.thickness * 0.5;
-
-  if (part.role === 'body_fairing') {
-    const chordEnv = Math.sin(Math.PI * (0.06 + 0.88 * t));
-    const edgeTaper = part.centerlineLocked ? 1.0 : Math.sin(Math.PI * (0.12 + 0.76 * su));
-    return halfMax * chordEnv * edgeTaper;
-  }
-
-  const naca =
-    5.0 *
-    (0.2969 * Math.sqrt(t) -
-      0.126 * t -
-      0.3516 * t * t +
-      0.2843 * t * t * t -
-      0.1015 * t * t * t * t);
-  return halfMax * Math.max(0.06, naca);
-}
-
-function bilinearLookup(grid: number[][], su: number, sv: number): number {
-  const nu = grid.length - 1;
-  const nv = grid[0].length - 1;
-  const fu = Math.max(0, Math.min(1, su)) * nu;
-  const fv = Math.max(0, Math.min(1, sv)) * nv;
-  const i0 = Math.min(nu - 1, Math.floor(fu));
-  const j0 = Math.min(nv - 1, Math.floor(fv));
-  const tu = fu - i0;
-  const tv = fv - j0;
-
-  const c00 = grid[i0][j0];
-  const c10 = grid[i0 + 1][j0];
-  const c01 = grid[i0][j0 + 1];
-  const c11 = grid[i0 + 1][j0 + 1];
-  return (1 - tu) * (1 - tv) * c00 + tu * (1 - tv) * c10 + (1 - tu) * tv * c01 + tu * tv * c11;
-}
 
 export function getLODSteps(
   part: AeroPartData,
@@ -110,13 +36,15 @@ export function getLODSteps(
 
 /**
  * High-performance bicubic Catmull-Rom patch evaluator producing watertight closed 3D shells
- * into zero-copy Float32Array and Uint32Array typed buffers.
+ * into zero-copy Float32Array and Uint32Array typed buffers, including welded procedural appendages
+ * and 2026 FIA Active Aerodynamics flap deflections.
  */
 export function evaluatePartSurface(
   part: AeroPartData,
   lod: LODLevel,
   vizMode: SurfaceVizMode = 'carbon',
-  cpMap?: PartSurfaceCpMap
+  cpMap?: PartSurfaceCpMap,
+  aeroMode: ActiveAeroMode = 'z_mode'
 ): EvaluatedPartSurface {
   const { uSteps, vSteps } = getLODSteps(part, lod);
   const grid = part.cage?.detail ?? part.grid;
@@ -194,10 +122,10 @@ export function evaluatePartSurface(
     }
   }
 
-  // 4. Exact pre-allocated buffer sizing
+  // 4. Shell vertex and index calculations
   const gridVerts = (uSteps + 1) * (vSteps + 1);
   const vertsPerHalf = gridVerts * 2; // Upper + Lower skins
-  const totalVerts = vertsPerHalf * 2; // Starboard (+X) + Port (-X)
+  const shellVerts = vertsPerHalf * 2; // Starboard (+X) + Port (-X)
 
   const quadsPerSkin = uSteps * vSteps;
   const leQuads = uSteps;
@@ -205,7 +133,12 @@ export function evaluatePartSurface(
   const tipQuads = vSteps;
   const rootQuads = part.centerlineLocked ? 0 : vSteps;
   const trisPerHalf = (quadsPerSkin * 2 + leQuads + teQuads + tipQuads + rootQuads) * 2;
-  const totalIndices = trisPerHalf * 2 * 3;
+  const shellIndices = trisPerHalf * 2 * 3;
+
+  // 5. Append welded procedural aerodynamic elements if active
+  const proc = buildProceduralElementsForPart(part);
+  const totalVerts = shellVerts + proc.vertexCount;
+  const totalIndices = shellIndices + proc.indices.length;
 
   const positions = new Float32Array(totalVerts * 3);
   const normals = new Float32Array(totalVerts * 3);
@@ -223,6 +156,8 @@ export function evaluatePartSurface(
   const carbonLowerR = 0.1;
   const carbonLowerG = 0.11;
   const carbonLowerB = 0.13;
+
+  const isXMode = aeroMode === 'x_mode';
 
   let posIdx = 0;
   let normIdx = 0;
@@ -246,8 +181,38 @@ export function evaluatePartSurface(
           if (part.centerlineLocked && iu === 0) {
             vx = 0;
           }
-          const vy = p.y + n.y * h;
-          const vz = p.z + n.z * h;
+          let vy = p.y + n.y * h;
+          let vz = p.z + n.z * h;
+
+          // 2026 Active Aerodynamics X-Mode flap deflection
+          if (isXMode) {
+            const ax = Math.abs(vx);
+            if (part.id === 'rear_wing' && ax <= 0.535 && vy >= 0.72 && sv > 0.30) {
+              const flapBlend =
+                Math.min(1, (sv - 0.30) / 0.25) * Math.min(1, (0.545 - ax) / 0.04);
+              const theta = -0.27 * flapBlend;
+              const pivotY = 0.785;
+              const pivotZ = 2.08;
+              const dyP = vy - pivotY;
+              const dzP = vz - pivotZ;
+              const cosT = Math.cos(theta);
+              const sinT = Math.sin(theta);
+              vy = pivotY + dyP * cosT + dzP * sinT;
+              vz = pivotZ - dyP * sinT + dzP * cosT;
+            } else if (part.id === 'front_wing' && ax <= 0.580 && vy >= 0.135 && sv > 0.38) {
+              const flapBlend =
+                Math.min(1, (sv - 0.38) / 0.25) * Math.min(1, (0.590 - ax) / 0.04);
+              const theta = -0.165 * flapBlend;
+              const pivotY = 0.165;
+              const pivotZ = -2.42;
+              const dyP = vy - pivotY;
+              const dzP = vz - pivotZ;
+              const cosT = Math.cos(theta);
+              const sinT = Math.sin(theta);
+              vy = pivotY + dyP * cosT + dzP * sinT;
+              vz = pivotZ - dyP * sinT + dzP * cosT;
+            }
+          }
 
           positions[posIdx++] = vx;
           positions[posIdx++] = vy;
@@ -349,6 +314,17 @@ export function evaluatePartSurface(
   buildHalf(1);
   buildHalf(-1);
 
+  // Merge procedural element buffers if present
+  if (proc.vertexCount > 0) {
+    positions.set(proc.positions, posIdx);
+    normals.set(proc.normals, normIdx);
+    colors.set(proc.colors, colIdx);
+    const baseOffset = shellVerts;
+    for (let i = 0; i < proc.indices.length; i++) {
+      indices[idxOffset++] = proc.indices[i] + baseOffset;
+    }
+  }
+
   return {
     partId: part.id,
     lod,
@@ -357,7 +333,7 @@ export function evaluatePartSurface(
     colors,
     indices,
     vertexCount: totalVerts,
-    triangleCount: idxOffset / 3,
+    triangleCount: totalIndices / 3,
   };
 }
 
@@ -365,11 +341,12 @@ export function evaluateAllSurfaces(
   parts: Record<PartId, AeroPartData>,
   lod: LODLevel,
   vizMode: SurfaceVizMode = 'carbon',
-  cpMaps?: Partial<Record<PartId, PartSurfaceCpMap>>
+  cpMaps?: Partial<Record<PartId, PartSurfaceCpMap>>,
+  aeroMode: ActiveAeroMode = 'z_mode'
 ): Record<PartId, EvaluatedPartSurface> {
   const result = {} as Record<PartId, EvaluatedPartSurface>;
   for (const key of Object.keys(parts) as PartId[]) {
-    result[key] = evaluatePartSurface(parts[key], lod, vizMode, cpMaps?.[key]);
+    result[key] = evaluatePartSurface(parts[key], lod, vizMode, cpMaps?.[key], aeroMode);
   }
   return result;
 }
@@ -430,4 +407,195 @@ export function updateBufferGeometryFromSurface(
     geom.computeBoundingBox();
     geom.computeBoundingSphere();
   }
+}
+
+/**
+ * Updates vertex colors in-place on an existing Three.js BufferGeometry.
+ */
+export function updateSurfaceColors(
+  geom: THREE.BufferGeometry,
+  part: AeroPartData,
+  vizMode: SurfaceVizMode,
+  cpMap?: PartSurfaceCpMap,
+  isSelectedPart = false
+): void {
+  const colAttr = geom.getAttribute('color') as THREE.BufferAttribute | undefined;
+  const posAttr = geom.getAttribute('position') as THREE.BufferAttribute | undefined;
+  if (!colAttr || !posAttr) return;
+
+  const outCol = colAttr.array as Float32Array;
+  const pos = posAttr.array as Float32Array;
+  const count = posAttr.count;
+
+  if (vizMode === 'carbon' || !cpMap) {
+    const hex = parseInt(part.accentHex.replace('#', ''), 16);
+    const rAcc = ((hex >> 16) & 255) / 255;
+    const gAcc = ((hex >> 8) & 255) / 255;
+    const bAcc = (hex & 255) / 255;
+    const tintAmt = isSelectedPart ? 0.22 : 0.08;
+    const baseR = 0.13 + rAcc * tintAmt;
+    const baseG = 0.15 + gAcc * tintAmt;
+    const baseB = 0.18 + bAcc * tintAmt;
+
+    for (let i = 0; i < count; i++) {
+      const o = i * 3;
+      outCol[o] = baseR;
+      outCol[o + 1] = baseG;
+      outCol[o + 2] = baseB;
+    }
+    colAttr.needsUpdate = true;
+    return;
+  }
+
+  // Derive bounding range for normalized su, sv mapping
+  let minX = Infinity, maxX = -Infinity, minZ = Infinity, maxZ = -Infinity;
+  for (let i = 0; i < count; i++) {
+    const ax = Math.abs(pos[i * 3]);
+    const z = pos[i * 3 + 2];
+    if (ax < minX) minX = ax;
+    if (ax > maxX) maxX = ax;
+    if (z < minZ) minZ = z;
+    if (z > maxZ) maxZ = z;
+  }
+  const spanX = Math.max(0.01, maxX - minX);
+  const spanZ = Math.max(0.01, maxZ - minZ);
+
+  if (vizMode === 'stall') {
+    for (let i = 0; i < count; i++) {
+      const o = i * 3;
+      const su = Math.max(0, Math.min(1, (Math.abs(pos[o]) - minX) / spanX));
+      const sv = Math.max(0, Math.min(1, (pos[o + 2] - minZ) / spanZ));
+      const sep = bilinearLookup(cpMap.separation, su, sv);
+      const [sr, sg, sb] = separationToRgb(sep);
+      outCol[o] = sr;
+      outCol[o + 1] = sg;
+      outCol[o + 2] = sb;
+    }
+    colAttr.needsUpdate = true;
+    return;
+  }
+
+  // vizMode === 'cp'
+  const normAttr = geom.getAttribute('normal') as THREE.BufferAttribute | undefined;
+  const norms = normAttr ? (normAttr.array as Float32Array) : null;
+
+  for (let i = 0; i < count; i++) {
+    const o = i * 3;
+    const su = Math.max(0, Math.min(1, (Math.abs(pos[o]) - minX) / spanX));
+    const sv = Math.max(0, Math.min(1, (pos[o + 2] - minZ) / spanZ));
+    const ny = norms ? norms[o + 1] : 1;
+    const nx = norms ? Math.abs(norms[o]) : 0;
+    const upperBlend = Math.max(0, Math.min(1, 0.5 + 0.65 * ny + 0.2 * nx));
+
+    const cpUp = bilinearLookup(cpMap.upperCp, su, sv);
+    const cpLo = bilinearLookup(cpMap.lowerCp, su, sv);
+    const cp = cpLo + (cpUp - cpLo) * upperBlend;
+    const [cr, cg, cb] = cpToRgb(cp);
+    outCol[o] = cr;
+    outCol[o + 1] = cg;
+    outCol[o + 2] = cb;
+  }
+  colAttr.needsUpdate = true;
+}
+
+/**
+ * Extracts area-weighted macro-panels and FIA legality sample points directly from
+ * a Three.js procedural car mesh (+X half-car).
+ */
+export function extractMeshPanelsAndLegality(
+  mesh: THREE.Mesh
+): { panels: MacroAeroPanel[]; legalityPts: Vec3[] } {
+  const geom = mesh.geometry;
+  const posAttr = geom.getAttribute('position') as THREE.BufferAttribute | undefined;
+  const idxAttr = geom.getIndex();
+
+  if (!posAttr) {
+    return { panels: [], legalityPts: [] };
+  }
+
+  const pos = posAttr.array as Float32Array;
+  const indices = idxAttr ? (idxAttr.array as Uint32Array) : null;
+  const totalTris = indices ? indices.length / 3 : pos.length / 9;
+
+  let minX = Infinity, maxX = -Infinity, minZ = Infinity, maxZ = -Infinity;
+  for (let i = 0; i < posAttr.count; i++) {
+    const ax = Math.abs(pos[i * 3]);
+    const z = pos[i * 3 + 2];
+    if (ax < minX) minX = ax;
+    if (ax > maxX) maxX = ax;
+    if (z < minZ) minZ = z;
+    if (z > maxZ) maxZ = z;
+  }
+  const spanX = Math.max(0.01, maxX - minX);
+  const spanZ = Math.max(0.01, maxZ - minZ);
+
+  // Target ~48 representative macro-panels per part for responsive CFD solve (< 10 ms)
+  const targetPanels = 48;
+  const stride = Math.max(1, Math.floor(totalTris / targetPanels));
+
+  const panels: MacroAeroPanel[] = [];
+  for (let t = 0; t < totalTris; t += stride) {
+    const i0 = indices ? indices[t * 3] : t * 3;
+    const i1 = indices ? indices[t * 3 + 1] : t * 3 + 1;
+    const i2 = indices ? indices[t * 3 + 2] : t * 3 + 2;
+
+    const o0 = i0 * 3, o1 = i1 * 3, o2 = i2 * 3;
+    const x0 = pos[o0], y0 = pos[o0 + 1], z0 = pos[o0 + 2];
+    const x1 = pos[o1], y1 = pos[o1 + 1], z1 = pos[o1 + 2];
+    const x2 = pos[o2], y2 = pos[o2 + 1], z2 = pos[o2 + 2];
+
+    const cx = (x0 + x1 + x2) / 3;
+    const cy = (y0 + y1 + y2) / 3;
+    const cz = (z0 + z1 + z2) / 3;
+
+    // Only process +X half-car (CFDSolver handles bilateral symmetry)
+    if (cx < -0.001) continue;
+
+    const d1x = x1 - x0, d1y = y1 - y0, d1z = z1 - z0;
+    const d2x = x2 - x0, d2y = y2 - y0, d2z = z2 - z0;
+    const crx = d1y * d2z - d1z * d2y;
+    const cry = d1z * d2x - d1x * d2z;
+    const crz = d1x * d2y - d1y * d2x;
+    const triArea = 0.5 * Math.hypot(crx, cry, crz);
+    if (triArea < 1e-6) continue;
+
+    const lenN = Math.hypot(crx, cry, crz) || 1;
+    const nx = crx / lenN;
+    const ny = cry / lenN;
+    const nz = crz / lenN;
+
+    const su = Math.max(0, Math.min(1, (Math.abs(cx) - minX) / spanX));
+    const sv = Math.max(0, Math.min(1, (cz - minZ) / spanZ));
+
+    panels.push({
+      cx,
+      cy,
+      cz,
+      nx,
+      ny,
+      nz,
+      tx: 0,
+      ty: 0,
+      tz: 1,
+      area: triArea * stride,
+      su,
+      sv,
+    });
+  }
+
+  // Sample +X vertices for legality checks (target ~60 points)
+  const legalityPts: Vec3[] = [];
+  const vertStride = Math.max(1, Math.floor(posAttr.count / 60));
+  for (let i = 0; i < posAttr.count; i += vertStride) {
+    const x = pos[i * 3];
+    if (x >= -0.001) {
+      legalityPts.push({
+        x: Math.max(0, x),
+        y: pos[i * 3 + 1],
+        z: pos[i * 3 + 2],
+      });
+    }
+  }
+
+  return { panels, legalityPts };
 }

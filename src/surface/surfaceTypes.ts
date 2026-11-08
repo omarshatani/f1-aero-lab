@@ -1,4 +1,4 @@
-import { CageV2, PartId, SurfaceVizMode } from '../types/aero';
+import { AeroPartData, CageV2, PartId, SurfaceVizMode } from '../types/aero';
 
 export type LODLevel = 'preview' | 'full';
 
@@ -26,7 +26,9 @@ export interface SurfaceWorkerRequest {
   type: 'tessellate_all' | 'tessellate_part';
   requestId: number;
   lod: LODLevel;
-  cages: Partial<Record<PartId, CageV2>>;
+  partId?: PartId;
+  cages?: Partial<Record<PartId, CageV2>>;
+  parts?: Partial<Record<PartId, AeroPartData>>;
   vizMode?: SurfaceVizMode;
 }
 

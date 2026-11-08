@@ -1,6 +1,7 @@
 import { sampleSplineSurface } from '../geometry/splineSurface';
 import {
   checkPartLegality,
+  DEFAULT_WHEEL_STANCE,
   PART_ORDER,
   WORLD_FRONT_AXLE_Z,
   WORLD_REAR_AXLE_Z,
@@ -14,6 +15,7 @@ import {
   PartCFDMetrics,
   PartId,
   PartSurfaceCpMap,
+  ProceduralElementConfig,
   TunnelSettings,
   Vec3,
 } from '../types/aero';
@@ -32,6 +34,13 @@ const FIA_2026_WHEELS = {
 
 function clamp(v: number, lo: number, hi: number): number {
   return v < lo ? lo : v > hi ? hi : v;
+}
+
+function getProceduralConfig(
+  part: AeroPartData,
+  elementId: string
+): ProceduralElementConfig | undefined {
+  return part.proceduralElements?.find((e) => e.id === elementId);
 }
 
 /**
@@ -183,12 +192,58 @@ export function runCFDSimulation(
     }
   }
 
+  // Read Wheel Stance Settings & compute offsets/drag deltas
+  const stance = settings.wheelStance ?? DEFAULT_WHEEL_STANCE;
+  const frontTrackOffsetM = (stance.frontTrackOffsetMm ?? 0) * 0.001;
+  const rearTrackOffsetM = (stance.rearTrackOffsetMm ?? 0) * 0.001;
+  const frontCamberDeg = stance.frontCamberDeg ?? DEFAULT_WHEEL_STANCE.frontCamberDeg;
+  const rearCamberDeg = stance.rearCamberDeg ?? DEFAULT_WHEEL_STANCE.rearCamberDeg;
+  const frontToeDeg = stance.frontToeDeg ?? DEFAULT_WHEEL_STANCE.frontToeDeg;
+  const rimCoverDishMm = stance.rimCoverDishMm ?? DEFAULT_WHEEL_STANCE.rimCoverDishMm;
+
+  const dFrontCamber = frontCamberDeg - DEFAULT_WHEEL_STANCE.frontCamberDeg;
+  const dRearCamber = rearCamberDeg - DEFAULT_WHEEL_STANCE.rearCamberDeg;
+  const dFrontToe = frontToeDeg - DEFAULT_WHEEL_STANCE.frontToeDeg;
+  const dRimDish = rimCoverDishMm - DEFAULT_WHEEL_STANCE.rimCoverDishMm;
+
+  const trackDeltaDrag =
+    (Math.abs(stance.frontTrackOffsetMm) + Math.abs(stance.rearTrackOffsetMm)) * 0.00035;
+  const camberDeltaDrag = (Math.abs(dFrontCamber) + Math.abs(dRearCamber)) * 0.0015;
+  const toeDeltaDrag = Math.abs(dFrontToe) * 0.022;
+  const dishDeltaDrag = clamp(dRimDish * 0.0003, -0.006, 0.010);
+  const wheelStanceDragDeltaN =
+    (trackDeltaDrag + camberDeltaDrag + toeDeltaDrag + dishDeltaDrag) * qInf * REF_AREA;
+
   // Mark homologated survival cell & 4 narrower 2026 rotating wheels into solid mask
   const wheels = [
-    { ...FIA_2026_WHEELS.front, sx: 1 },
-    { ...FIA_2026_WHEELS.front, sx: -1 },
-    { ...FIA_2026_WHEELS.rear, sx: 1 },
-    { ...FIA_2026_WHEELS.rear, sx: -1 },
+    {
+      ...FIA_2026_WHEELS.front,
+      x: FIA_2026_WHEELS.front.x + frontTrackOffsetM,
+      sx: 1,
+      camber: frontCamberDeg,
+      toe: frontToeDeg,
+    },
+    {
+      ...FIA_2026_WHEELS.front,
+      x: FIA_2026_WHEELS.front.x + frontTrackOffsetM,
+      sx: -1,
+      camber: frontCamberDeg,
+      toe: frontToeDeg,
+    },
+    {
+      ...FIA_2026_WHEELS.rear,
+      x: FIA_2026_WHEELS.rear.x + rearTrackOffsetM,
+      sx: 1,
+      camber: rearCamberDeg,
+      toe: 0,
+    },
+    {
+      ...FIA_2026_WHEELS.rear,
+      x: FIA_2026_WHEELS.rear.x + rearTrackOffsetM,
+      sx: -1,
+      camber: rearCamberDeg,
+      toe: 0,
+    },
   ];
 
   for (let k = 0; k < nz; k++) {
@@ -208,9 +263,15 @@ export function runCFDSimulation(
           }
         }
 
-        // 4 Rotating 2026 Wheels
+        // 4 Rotating 2026 Wheels (incorporating stance offsets, camber tilt, and toe angle)
         for (const w of wheels) {
-          const wx = w.sx * w.x;
+          const camberRad = (w.camber * Math.PI) / 180;
+          const toeRad = (w.toe * Math.PI) / 180;
+          const wx =
+            w.sx *
+            (w.x +
+              (y - w.y) * Math.sin(camberRad) * w.sx +
+              (z - w.z) * Math.sin(toeRad) * w.sx);
           const dr = Math.hypot(y - w.y, z - w.z);
           if (Math.abs(x - wx) <= w.width * 0.52 && dr <= w.radius) {
             field.solid[c] = 1;
@@ -309,7 +370,13 @@ export function runCFDSimulation(
 
           // Rotating 2026 wheel bow deflection & tire squirt wake
           for (const w of wheels) {
-            const wx = w.sx * w.x;
+            const camberRad = (w.camber * Math.PI) / 180;
+            const toeRad = (w.toe * Math.PI) / 180;
+            const wx =
+              w.sx *
+              (w.x +
+                (y - w.y) * Math.sin(camberRad) * w.sx +
+                (z - w.z) * Math.sin(toeRad) * w.sx);
             const dxW = x - wx;
             const dyW = y - w.y;
             const dzW = z - w.z;
@@ -324,8 +391,11 @@ export function runCFDSimulation(
                   field.cp[c] += 0.22 * (1.35 - distLat);
                 } else {
                   const squirt = y < 0.16 ? 1.32 : 1.0;
+                  const dishFactor = 1.0 + clamp(dRimDish * 0.02, -0.15, 0.25);
+                  const toeFactor = 1.0 + Math.abs(dFrontToe) * 1.5;
                   field.turbulence[c] = clamp(
-                    field.turbulence[c] + 0.23 * (1.35 - distLat) * squirt,
+                    field.turbulence[c] +
+                      0.23 * (1.35 - distLat) * squirt * dishFactor * toeFactor,
                     0,
                     0.92
                   );
@@ -350,7 +420,7 @@ export function runCFDSimulation(
     }
   };
 
-  // 2. Front-to-rear physical marching across all 7 FIA 2026 Aero Parts
+  // 2. Front-to-rear physical marching across all 11 FIA 2026 Components
   const uSamples = 16;
   const vSamples = 14;
 
@@ -374,8 +444,8 @@ export function runCFDSimulation(
 
   let sumDownforceN = 0;
   let sumRearAxleMoment = 0;
-  // Narrower 2026 tires & wheel scoops reduce open-wheel parasitic drag (~0.37 Cd_base)
-  const baseChassisDragN = 0.37 * qInf * REF_AREA;
+  // Narrower 2026 tires & wheel scoops reduce open-wheel parasitic drag (~0.360 Cd_base + stance delta)
+  const baseChassisDragN = 0.360 * qInf * REF_AREA + wheelStanceDragDeltaN;
   let sumDragN = baseChassisDragN;
 
   let frontWingOutwashScore = 0;
@@ -562,12 +632,12 @@ export function runCFDSimulation(
               let activeFlapDeltaRad = 0;
               let xModeDragFactor = 1.0;
               if (isXMode) {
-                if (partId === 'rear_wing' && cx <= 0.535 && sv > 0.32) {
-                  activeFlapDeltaRad = -0.25 * clamp((sv - 0.32) / 0.35, 0, 1);
-                  xModeDragFactor = 0.52;
-                } else if (partId === 'front_wing' && cx <= 0.580 && sv > 0.38) {
-                  activeFlapDeltaRad = -0.195 * clamp((sv - 0.38) / 0.35, 0, 1);
-                  xModeDragFactor = 0.62;
+                if (partId === 'rear_wing' && cx <= 0.540 && sv > 0.25) {
+                  activeFlapDeltaRad = -0.29 * clamp((sv - 0.25) / 0.35, 0, 1);
+                  xModeDragFactor = 0.28;
+                } else if (partId === 'front_wing' && cx <= 0.580 && sv > 0.30) {
+                  activeFlapDeltaRad = -0.21 * clamp((sv - 0.30) / 0.35, 0, 1);
+                  xModeDragFactor = 0.40;
                 }
               }
 
@@ -583,7 +653,41 @@ export function runCFDSimulation(
                 sep = clamp((absAoA - stallAngle) / 0.18, 0, 1);
               }
 
-              const liftSlope = partId === 'front_wing' ? 4.58 : 8.65;
+              let liftSlope = partId === 'front_wing' ? 4.88 : 8.95;
+              let inducedFactor = (partId === 'rear_wing' ? 0.105 : 0.088) * xModeDragFactor;
+
+              // Procedural appendage coupling on wings
+              if (partId === 'front_wing') {
+                const dp = getProceduralConfig(part, 'fw_diveplane');
+                if (dp?.enabled) {
+                  const dpScale = dp.scale ?? 1.0;
+                  frontWingOutwashScore += 0.008 * dpScale;
+                  liftSlope += 0.12 * dpScale;
+                }
+                const gurney = getProceduralConfig(part, 'fw_gurney');
+                if (gurney?.enabled) {
+                  const gScale = gurney.scale ?? 1.0;
+                  liftSlope += 0.28 * gScale;
+                  inducedFactor += 0.015 * gScale;
+                }
+              } else if (partId === 'rear_wing') {
+                const rwG = getProceduralConfig(part, 'rw_gurney');
+                if (rwG?.enabled) {
+                  const gScale = rwG.scale ?? 1.0;
+                  liftSlope += 0.45 * gScale;
+                  inducedFactor += 0.025 * gScale;
+                }
+                const epV = getProceduralConfig(part, 'rw_endplate_vanes');
+                if (epV?.enabled) {
+                  const vCount = epV.count ?? 3;
+                  const vScale = epV.scale ?? 1.0;
+                  inducedFactor = Math.max(
+                    0.05,
+                    inducedFactor - 0.008 * (vCount / 3) * vScale
+                  );
+                }
+              }
+
               const rawCn =
                 liftSlope *
                 Math.sin(clamp(effAoA, -0.62, 0.62)) *
@@ -596,7 +700,6 @@ export function runCFDSimulation(
               cpLower = clamp(-0.78 * rawCn, -1.85, 0.65);
 
               panelDownforce = quadArea * qInf * rawCn * Math.max(0.35, absNy);
-              const inducedFactor = (partId === 'rear_wing' ? 0.105 : 0.088) * xModeDragFactor;
               panelDrag =
                 quadArea *
                 qInf *
@@ -627,7 +730,17 @@ export function runCFDSimulation(
               sep = clamp((Math.abs(effVaneAngle) - 0.42) / 0.18, 0, 1);
             }
 
-            const vaneLoad = clamp(3.6 * effVaneAngle, -1.15, 1.15) * qRatio * (1 - 0.55 * sep);
+            let vaneLoad = clamp(3.6 * effVaneAngle, -1.15, 1.15) * qRatio * (1 - 0.55 * sep);
+
+            // Procedural auxiliary wake slat
+            const auxS = getProceduralConfig(part, 'fb_aux_slat');
+            if (auxS?.enabled) {
+              const sCount = auxS.count ?? 2;
+              const sScale = auxS.scale ?? 1.0;
+              floorBoardWakeScore += 0.008 * (sCount / 2) * sScale;
+              vaneLoad += 0.12 * (sCount / 2) * sScale;
+            }
+
             cpUpper = -0.45 * vaneLoad;
             cpLower = 0.45 * vaneLoad;
 
@@ -670,13 +783,29 @@ export function runCFDSimulation(
               sep = clamp((0.022 - hLocal) / 0.015, 0, 1);
             }
 
-            const edgeLeakPenalty =
+            let edgeLeakPenalty =
               hEdge > 0.072 ? clamp(1.0 - (hEdge - 0.072) * 3.8, 0.55, 1.0) : 1.04;
 
+            // Procedural floor edge scroll curl sealing
+            const scroll = getProceduralConfig(part, 'floor_edge_scroll');
+            if (scroll?.enabled) {
+              edgeLeakPenalty = Math.min(1.10, edgeLeakPenalty + 0.05 * (scroll.scale ?? 1.0));
+            }
+
+            // Procedural underfloor vortex strakes
+            const fences = getProceduralConfig(part, 'floor_fences');
+            let fenceBonus = 0;
+            if (fences?.enabled) {
+              const fCount = fences.count ?? 3;
+              const fScale = fences.scale ?? 1.0;
+              const fPitchRad = ((fences.pitchDeg ?? 6) * Math.PI) / 180;
+              fenceBonus = 0.06 * (fCount / 3) * fScale * Math.cos(fPitchRad);
+            }
+
             const venturiRatio = clamp(
-              (hInlet - hLocal) / (hLocal + 0.048) + 0.082 / (hLocal + 0.055),
+              (hInlet - hLocal) / (hLocal + 0.048) + 0.082 / (hLocal + 0.055) + fenceBonus,
               -0.15,
-              1.30
+              1.35
             );
             const accel =
               1.0 + 0.56 * venturiRatio * edgeLeakPenalty * wakeEta * (1.0 - 0.8 * sep);
@@ -685,9 +814,9 @@ export function runCFDSimulation(
             cpUpper = clamp(-0.08 * qRatio + 0.22 * Math.max(0, -tv.y), -0.45, 0.35);
 
             const netSuction = cpUpper - cpLower;
-            panelDownforce = quadArea * qInf * netSuction * 0.90;
+            panelDownforce = quadArea * qInf * netSuction * 0.77;
             panelDrag =
-              quadArea * qInf * (0.014 * qRatio + 0.022 * Math.max(0, netSuction) + 0.36 * sep);
+              quadArea * qInf * (0.015 * qRatio + 0.024 * Math.max(0, netSuction) + 0.36 * sep);
 
             addImpulse({
               x: wx,
@@ -701,21 +830,35 @@ export function runCFDSimulation(
               radius: 0.19,
             });
           } else if (part.role === 'diffuser') {
-            // 2026 Beainless Rear Underbody Diffuser & Boat-Tail
+            // 2026 Beamless Rear Underbody Diffuser & Boat-Tail
             const expAngle = Math.atan2(tv.y, Math.max(0.1, tv.z));
             const upperDeckFlow = sampleCFDField(field, wx, cy + 0.18, cz);
             const downwashBonus = clamp(-upperDeckFlow.vy / vInf, -0.05, 0.22);
 
-            const critAngle = 0.255 + 0.32 * Math.max(0, downwashBonus);
+            // Procedural internal diffuser expansion strakes
+            const strakes = getProceduralConfig(part, 'diff_strakes');
+            let strakeBonus = 0;
+            if (strakes?.enabled) {
+              strakeBonus = 0.035 * ((strakes.count ?? 3) / 3) * (strakes.scale ?? 1.0);
+            }
+
+            const critAngle = 0.255 + strakeBonus + 0.32 * Math.max(0, downwashBonus);
             if (expAngle > critAngle) {
               sep = clamp((expAngle - critAngle) / 0.14, 0, 1);
             } else if (expAngle < 0.015) {
               sep = 0.14;
             }
 
+            // Procedural trailing edge diffuser gurney flap
+            const dG = getProceduralConfig(part, 'diff_gurney');
+            let dGBonus = 0;
+            if (dG?.enabled) {
+              dGBonus = 0.12 * (dG.scale ?? 1.0);
+            }
+
             const optRatio = Math.sin(clamp(expAngle, -0.1, 0.38)) * 4.7;
             const suction =
-              (0.44 + optRatio + 1.45 * Math.max(0, downwashBonus)) *
+              (0.44 + optRatio + dGBonus + 1.45 * Math.max(0, downwashBonus)) *
               wakeEta *
               qRatio *
               (1.0 - 0.68 * sep);
@@ -724,12 +867,12 @@ export function runCFDSimulation(
             cpUpper = clamp(-0.12 - 0.4 * Math.max(0, downwashBonus), -0.55, 0.25);
 
             const absNy = Math.max(0.35, Math.abs(n.y));
-            panelDownforce = quadArea * qInf * (cpUpper - cpLower) * absNy * 1.22;
+            panelDownforce = quadArea * qInf * (cpUpper - cpLower) * absNy * 1.14;
             panelDrag =
               quadArea *
               qInf *
-              (0.025 +
-                0.085 * suction * suction * 0.25 +
+              (0.026 +
+                0.090 * suction * suction * 0.25 +
                 0.92 * sep * Math.sin(Math.max(0, expAngle)));
 
             addImpulse({
@@ -743,56 +886,183 @@ export function runCFDSimulation(
               dturb: 0.045 + 0.55 * sep,
               radius: 0.22,
             });
+          } else if (part.role === 'suspension') {
+            // Front & Rear Wishbones, Pushrods and Brake Cooling Upright Pods
+            if (partId === 'front_suspension') {
+              const bdw = getProceduralConfig(part, 'fsusp_duct_winglet');
+              let bdwOutwash = 0;
+              let bdwDf = 0;
+              if (bdw?.enabled) {
+                const wCount = bdw.count ?? 2;
+                const wScale = bdw.scale ?? 1.0;
+                bdwOutwash = 0.008 * (wCount / 2) * wScale;
+                bdwDf = 0.05 * (wCount / 2) * wScale;
+                frontWingOutwashScore += bdwOutwash;
+              }
+              const antiDiveRad = Math.asin(clamp(tv.y, -0.4, 0.4));
+              cpUpper = clamp(0.18 * wakeEta - 0.20 * antiDiveRad + bdwDf, -0.22, 0.45);
+              cpLower = clamp(-0.15 * qRatio, -0.40, 0.15);
+              panelDownforce = quadArea * qInf * (cpUpper - cpLower) * 0.28;
+              panelDrag =
+                quadArea *
+                qInf *
+                (0.022 * qRatio + 0.04 * Math.abs(antiDiveRad) + 0.02 * Math.abs(tv.x));
+              addImpulse({
+                x: wx,
+                y: cy,
+                z: cz,
+                dvx: side * vInf * (0.02 + bdwOutwash * 2.0),
+                dvy: -0.035 * vInf,
+                dvz: 0.02 * vInf * wakeEta,
+                dcp: cpUpper * 0.20,
+                dturb: -0.06 * wakeEta,
+                radius: 0.18,
+              });
+            } else {
+              // Rear suspension
+              const uw = getProceduralConfig(part, 'rsusp_upwash_winglets');
+              let uwLift = 0;
+              let uwImpulse = 0;
+              if (uw?.enabled) {
+                const wCount = uw.count ?? 3;
+                const wScale = uw.scale ?? 1.0;
+                uwLift = 0.06 * (wCount / 3) * wScale;
+                uwImpulse = 0.03 * (wCount / 3) * wScale;
+              }
+              cpUpper = clamp(0.16 * wakeEta + uwLift, -0.18, 0.45);
+              cpLower = clamp(-0.12 * qRatio, -0.35, 0.15);
+              panelDownforce = quadArea * qInf * (cpUpper - cpLower) * 0.26;
+              panelDrag = quadArea * qInf * (0.020 * qRatio + 0.03 * Math.abs(tv.y));
+              addImpulse({
+                x: wx,
+                y: cy,
+                z: cz,
+                dvx: side * 0.02 * vInf,
+                dvy: vInf * (0.025 + uwImpulse),
+                dvz: -0.015 * vInf,
+                dcp: cpUpper * 0.16,
+                dturb: 0.012,
+                radius: 0.18,
+              });
+            }
+          } else if (part.role === 'chassis_body') {
+            // Homologated Carbon Survival Cell / Cockpit Tub & Engine Cover / Dorsal Sharkfin
+            if (partId === 'monocoque') {
+              const hb = getProceduralConfig(part, 'mono_halo_boomerang');
+              let hbDf = 0;
+              if (hb?.enabled) {
+                hbDf = 0.05 * (hb.scale ?? 1.0);
+              }
+              const slope = Math.asin(clamp(tv.y, -0.5, 0.5));
+              cpUpper = clamp(0.14 * Math.max(0, -slope) + 0.05 + hbDf, -0.12, 0.40);
+              cpLower = clamp(-0.08 * qRatio, -0.22, 0.10);
+              panelDownforce = quadArea * qInf * (cpUpper - cpLower) * 0.22;
+              panelDrag =
+                quadArea *
+                qInf *
+                (0.024 * qRatio + 0.045 * Math.abs(slope) + 0.022 * Math.abs(n.x));
+              addImpulse({
+                x: wx,
+                y: cy,
+                z: cz,
+                dvx: side * 0.025 * vInf,
+                dvy: -0.025 * vInf * Math.max(0, -slope),
+                dvz: 0.02 * vInf,
+                dcp: cpUpper * 0.15,
+                dturb: 0.010,
+                radius: 0.18,
+              });
+            } else {
+              // Engine Cover
+              const sfe = getProceduralConfig(part, 'ec_sharkfin_ext');
+              const sfeBonus = sfe?.enabled ? 0.35 * (sfe.scale ?? 1.0) : 0;
+              const rampDownwash = Math.max(0, -tv.y);
+              cpUpper = clamp(0.14 * rampDownwash + 0.04, -0.12, 0.38);
+              cpLower = clamp(-0.08 * qRatio, -0.22, 0.10);
+              panelDownforce = quadArea * qInf * (cpUpper - cpLower) * 0.22;
+              const yawImpact = Math.abs(Math.sin(yawRad)) * Math.abs(n.x);
+              panelDrag =
+                quadArea *
+                qInf *
+                (0.022 * qRatio +
+                  0.038 * rampDownwash +
+                  0.045 * yawImpact * (1.0 - 0.25 * sfeBonus));
+              const yawStraighten =
+                yawRad !== 0
+                  ? -Math.sign(localFlow.vx) *
+                    0.06 *
+                    vInf *
+                    Math.abs(n.x) *
+                    (1.0 + sfeBonus)
+                  : 0;
+              addImpulse({
+                x: wx,
+                y: cy,
+                z: cz,
+                dvx: yawStraighten,
+                dvy: -0.035 * vInf * rampDownwash,
+                dvz: 0.025 * vInf,
+                dcp: cpUpper * 0.18,
+                dturb: 0.012,
+                radius: 0.20,
+              });
+            }
           } else {
             // Body Fairing (Nosecone & Sidepods / Coke-Bottle)
-            const nWorldX = n.x * side;
-            const vDotN =
-              (localFlow.vx * nWorldX + localFlow.vy * n.y + localFlow.vz * n.z) / vLocMag;
-            const impact = clamp(-vDotN, -0.8, 0.95);
-
-            const slopeMag = Math.hypot(tv.x, tv.y);
-            if (slopeMag > 0.64) {
-              sep = clamp((slopeMag - 0.64) / 0.25, 0, 1);
-            }
-
-            cpUpper = clamp(0.85 * impact - 0.22 * (1 - Math.abs(impact)), -0.65, 0.92);
-            cpLower = clamp(-0.18 * qRatio, -0.55, 0.25);
-
-            if (partId === 'sidepods') {
+            if (partId === 'nosecone') {
+              const ncv = getProceduralConfig(part, 'nose_cape_vanes');
+              const ncvBonus = ncv?.enabled ? 0.04 * (ncv.scale ?? 1.0) : 0;
+              const droop = Math.max(0, -tv.y);
+              cpUpper = clamp(0.12 * droop + ncvBonus, -0.15, 0.38);
+              cpLower = clamp(-0.10 * qRatio, -0.30, 0.10);
+              panelDownforce = quadArea * qInf * (cpUpper - cpLower) * 0.20;
+              panelDrag = quadArea * qInf * (0.018 * qRatio + 0.030 * droop * droop);
+              addImpulse({
+                x: wx,
+                y: cy,
+                z: cz,
+                dvx: side * 0.02 * vInf,
+                dvy: -0.02 * vInf,
+                dvz: 0.015 * vInf,
+                dcp: cpUpper * 0.15,
+                dturb: 0.008,
+                radius: 0.16,
+              });
+            } else {
+              // Sidepods
+              const louvers = getProceduralConfig(part, 'sp_cooling_louvers');
+              let louverDragRelief = 0;
+              let louverPlume = 0;
+              if (louvers?.enabled) {
+                const lCount = louvers.count ?? 4;
+                const lScale = louvers.scale ?? 1.0;
+                louverDragRelief = 0.006 * (lCount / 4) * lScale;
+                louverPlume = 0.018 * (lCount / 4) * lScale;
+              }
+              const undercutClearance = clamp(0.70 - cx, 0, 0.35);
+              const rampDownwash = Math.max(0, -tv.y);
               if (iu <= 2 && tv.y < 0) {
                 sidepodDownwashScore += -tv.y * quadArea;
               }
-              const undercutClearance = clamp(0.70 - cx, 0, 0.35);
+              cpUpper = clamp(0.14 * rampDownwash - 0.04, -0.18, 0.35);
+              cpLower = clamp(-0.09 * qRatio, -0.28, 0.10);
+              panelDownforce = quadArea * qInf * (cpUpper - cpLower) * 0.18;
+              panelDrag =
+                quadArea *
+                qInf *
+                (0.028 * qRatio + 0.032 * rampDownwash - louverDragRelief);
               addImpulse({
                 x: side * (cx + 0.05),
                 y: Math.max(0.05, cy - 0.05),
                 z: cz,
                 dvx: side * vInf * clamp(tv.x * 0.35, -0.22, 0.22),
-                dvy: vInf * clamp(tv.y * 0.48, -0.28, 0.18),
-                dvz: vInf * (0.06 * undercutClearance - 0.11 * sep),
-                dcp: cpUpper * 0.28,
-                dturb: Math.max(-0.06 * undercutClearance, 0.025 + 0.35 * sep),
+                dvy: vInf * clamp(tv.y * 0.48 + louverPlume, -0.28, 0.18),
+                dvz: vInf * (0.06 * undercutClearance),
+                dcp: cpUpper * 0.20,
+                dturb: Math.max(-0.06 * undercutClearance, 0.015),
                 radius: 0.22,
               });
-            } else {
-              addImpulse({
-                x: wx,
-                y: cy,
-                z: cz,
-                dvx: side * 0.055 * vInf,
-                dvy: vInf * clamp(tv.y * 0.32, -0.1, 0.24),
-                dvz: 0.02 * vInf,
-                dcp: cpUpper * 0.25,
-                dturb: 0.02 + 0.25 * sep,
-                radius: 0.16,
-              });
             }
-
-            panelDownforce = quadArea * qInf * (cpUpper * n.y) * 0.52;
-            panelDrag =
-              quadArea *
-              qInf *
-              (0.020 + 0.38 * Math.max(0, impact) * Math.max(0, impact) + 0.52 * sep);
           }
 
           partDownforceN += panelDownforce;

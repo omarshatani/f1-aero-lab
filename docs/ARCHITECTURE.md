@@ -8,25 +8,25 @@ This document details the runtime data flow, 3D mesh segmentation & welding pipe
 
 ```mermaid
 flowchart TD
-    Boot["main.ts bootstrap()"] --> Store["CarProjectStore (src/state/CarProjectStore.ts)"]
+    Boot["main.ts bootstrap"] --> Store["CarProjectStore (src/state/CarProjectStore.ts)"]
     Boot --> Scene["SceneManager (src/editor/SceneManager.ts)"]
     Boot --> HUD["HudController (src/ui/HudController.ts)"]
 
-    Scene -->|Async GLTF/GLB Load| Loader["CarModelLoader (src/geometry/CarModelLoader.ts)"]
-    Loader -->|Welded Buffers + Seam Pins + Baked Colors| FFD["7x PartFFDController (src/geometry/ffdDeformer.ts)"]
+    Scene -->|Async GLB Load| Loader["CarModelLoader (src/geometry/CarModelLoader.ts)"]
+    Loader -->|Welded Buffers and Seam Pins| FFD["7x PartFFDController (src/geometry/ffdDeformer.ts)"]
 
-    HUD -->|User Controls / Hotkeys / Presets| Store
-    Sculpt["PartSculptor (src/editor/PartSculptor.ts)"] -->|3D Gizmo Drag on grid[u][v]| Store
+    HUD -->|User Controls, Hotkeys, Presets| Store
+    Sculpt["PartSculptor (src/editor/PartSculptor.ts)"] -->|3D Gizmo Drag on Control Grid| Store
     Sculpt -->|Live Pointer Drag| Scene
 
-    FFD -->|MacroAeroPanel[] + Legality Sample Pts| Store
-    Store -->|runCFDSimulation()| CFD["CFDSolver (src/cfd/CFDSolver.ts)"]
-    CFD -->|CFDResult: CL, CD, CoP, Cp Maps, 34x20x60 Field| Store
+    FFD -->|MacroAeroPanels and Legality Sample Pts| Store
+    Store -->|runCFDSimulation| CFD["CFDSolver (src/cfd/CFDSolver.ts)"]
+    CFD -->|CFDResult: CL, CD, CoP, Cp Maps, 3D Field| Store
 
-    Store -->|subscribe()| Scene
-    Store -->|subscribe()| HUD
-    Scene --> LegViz["LegalityVisualizer (FIA RV-* Wireframes)"]
-    Scene --> CFDViz["CFDVisualizer (RK2 Streamlines + 2D Wake Slice)"]
+    Store -->|subscribe| Scene
+    Store -->|subscribe| HUD
+    Scene --> LegViz["LegalityVisualizer (FIA RV Wireframes)"]
+    Scene --> CFDViz["CFDVisualizer (RK2 Streamlines and 2D Wake Slice)"]
 ```
 
 ---

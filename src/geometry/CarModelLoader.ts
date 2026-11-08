@@ -38,87 +38,7 @@ interface RawBucketAccumulator {
 
 const MODEL_URLS: Record<CarModelId, string> = {
   fia_2026_concept: '/f1_2026_concept_polygon_model.glb',
-  ferrari_sf26: '/2026_ferrari_sf-26/scene.gltf',
 };
-
-/**
- * Sample texture pixels on an offscreen small canvas so textured GLTF models (like Ferrari SF-26)
- * preserve their authentic livery colors even after spatial welding & FFD segmentation.
- */
-class TextureColorSampler {
-  private cache = new Map<THREE.Texture, { data: Uint8ClampedArray; w: number; h: number } | null>();
-
-  public sampleMaterialColor(
-    mat: THREE.Material | undefined,
-    u: number,
-    v: number,
-    outRgb: [number, number, number]
-  ): void {
-    if (!mat) {
-      outRgb[0] = 0.16;
-      outRgb[1] = 0.18;
-      outRgb[2] = 0.21;
-      return;
-    }
-
-    const std = mat as THREE.MeshStandardMaterial;
-    let r = std.color ? std.color.r : 0.8;
-    let g = std.color ? std.color.g : 0.8;
-    let b = std.color ? std.color.b : 0.8;
-
-    const map = std.map;
-    if (map && map.image) {
-      let entry = this.cache.get(map);
-      if (entry === undefined) {
-        entry = this.extractImageData(map);
-        this.cache.set(map, entry);
-      }
-      if (entry) {
-        let uu = u - Math.floor(u);
-        let vv = v - Math.floor(v);
-        if (map.flipY) vv = 1 - vv;
-        const px = Math.min(entry.w - 1, Math.max(0, Math.floor(uu * entry.w)));
-        const py = Math.min(entry.h - 1, Math.max(0, Math.floor(vv * entry.h)));
-        const idx = (py * entry.w + px) * 4;
-        // Convert sRGB texture byte to linear-ish display color
-        const tr = entry.data[idx] / 255;
-        const tg = entry.data[idx + 1] / 255;
-        const tb = entry.data[idx + 2] / 255;
-        r *= tr;
-        g *= tg;
-        b *= tb;
-      }
-    }
-
-    outRgb[0] = r;
-    outRgb[1] = g;
-    outRgb[2] = b;
-  }
-
-  private extractImageData(
-    tex: THREE.Texture
-  ): { data: Uint8ClampedArray; w: number; h: number } | null {
-    try {
-      const img = tex.image as HTMLImageElement | HTMLCanvasElement | ImageBitmap;
-      const srcW = (img as { width?: number }).width || 0;
-      const srcH = (img as { height?: number }).height || 0;
-      if (!srcW || !srcH) return null;
-
-      const w = Math.min(256, srcW);
-      const h = Math.min(256, srcH);
-      const canvas = document.createElement('canvas');
-      canvas.width = w;
-      canvas.height = h;
-      const ctx = canvas.getContext('2d');
-      if (!ctx) return null;
-      ctx.drawImage(img as CanvasImageSource, 0, 0, w, h);
-      const imgData = ctx.getImageData(0, 0, w, h);
-      return { data: imgData.data, w, h };
-    } catch {
-      return null;
-    }
-  }
-}
 
 /**
  * Spatial classification of a car triangle centroid (in World meters & FIA 2026 mm)
@@ -127,40 +47,13 @@ class TextureColorSampler {
 function classifyTriangle(
   wx: number,
   wy: number,
-  wz: number,
-  modelId: CarModelId,
-  matName: string
+  wz: number
 ): BucketId {
   const { xF, yFia, zFia } = worldToFiaMm({ x: wx, y: wy, z: wz });
   const ay = Math.abs(yFia);
   const xR = xF - 3400.0;
 
-  // 1. Explicit material-based routing for Ferrari SF-26 sub-meshes
-  if (modelId === 'ferrari_sf26') {
-    const m = matName.toLowerCase();
-    if (m.includes('tyre') || m.includes('wheel_hub') || m.includes('discs')) {
-      if (wz < 0) return wx >= 0 ? 'wheel_fr' : 'wheel_fl';
-      return wx >= 0 ? 'wheel_rr' : 'wheel_rl';
-    }
-    if (
-      m.includes('chrome') ||
-      m.includes('kers') ||
-      m.includes('lcd') ||
-      m.includes('clearled') ||
-      m.includes('clared') ||
-      m.includes('plastic_interior') ||
-      m.includes('sf25_sw') ||
-      m.includes('cinture') ||
-      m.includes('driver') ||
-      m.includes('mirror') ||
-      m.includes('glass') ||
-      m.includes('rear_light')
-    ) {
-      return 'static_chassis';
-    }
-  }
-
-  // 2. Geometric 4-Wheel Cylinder Isolation (exact match on FIA 2026 Concept Car disconnected shells)
+  // 1. Geometric 4-Wheel Cylinder Isolation (exact match on FIA 2026 Concept Car disconnected shells)
   const dFrontAxle = Math.hypot(xF, zFia - 328.7);
   if (dFrontAxle < 364.5 && ay > 588) {
     return wx >= 0 ? 'wheel_fr' : 'wheel_fl';
@@ -359,10 +252,7 @@ export class CarModelLoader {
     onProgress?: (pct: number, label: string) => void
   ): Promise<LoadedCarAssembly> {
     const url = MODEL_URLS[modelId];
-    const modelLabel =
-      modelId === 'fia_2026_concept'
-        ? 'Official FIA 2026 Concept Model'
-        : 'Ferrari SF-26 (2026 Spec)';
+    const modelLabel = 'Official FIA 2026 Concept Model';
 
     onProgress?.(5, `Downloading ${modelLabel}...`);
 
@@ -389,13 +279,13 @@ export class CarModelLoader {
     gltf.scene.updateMatrixWorld(true);
 
     const allBuckets: Record<BucketId, RawBucketAccumulator> = {
-      front_wing: { positions: [], colors: [], hasColors: modelId === 'ferrari_sf26' },
-      nosecone: { positions: [], colors: [], hasColors: modelId === 'ferrari_sf26' },
-      floor_boards: { positions: [], colors: [], hasColors: modelId === 'ferrari_sf26' },
-      floor: { positions: [], colors: [], hasColors: modelId === 'ferrari_sf26' },
-      sidepods: { positions: [], colors: [], hasColors: modelId === 'ferrari_sf26' },
-      diffuser: { positions: [], colors: [], hasColors: modelId === 'ferrari_sf26' },
-      rear_wing: { positions: [], colors: [], hasColors: modelId === 'ferrari_sf26' },
+      front_wing: { positions: [], colors: [], hasColors: false },
+      nosecone: { positions: [], colors: [], hasColors: false },
+      floor_boards: { positions: [], colors: [], hasColors: false },
+      floor: { positions: [], colors: [], hasColors: false },
+      sidepods: { positions: [], colors: [], hasColors: false },
+      diffuser: { positions: [], colors: [], hasColors: false },
+      rear_wing: { positions: [], colors: [], hasColors: false },
       static_chassis: { positions: [], colors: [], hasColors: true },
       wheel_fl: { positions: [], colors: [], hasColors: true },
       wheel_fr: { positions: [], colors: [], hasColors: true },
@@ -404,16 +294,9 @@ export class CarModelLoader {
     };
 
     const baselinePartsForFilter: Record<PartId, AeroPartData> = createBaselineParts();
-    const texSampler = new TextureColorSampler();
-    const tmpVec = new THREE.Vector3();
     const rgb0: [number, number, number] = [0.2, 0.2, 0.2];
     const rgb1: [number, number, number] = [0.2, 0.2, 0.2];
     const rgb2: [number, number, number] = [0.2, 0.2, 0.2];
-
-    // Ferrari SF-26 canonical FIA 2026 alignment constants (verified from wheel axles)
-    const ferrariScale = 3.40 / 3.533;
-    const ferrariZMid = -0.2445;
-    const ferrariGroundLift = 0.027;
 
     gltf.scene.traverse((obj) => {
       const mesh = obj as THREE.Mesh;
@@ -422,67 +305,43 @@ export class CarModelLoader {
       const geo = mesh.geometry;
       const posAttr = geo.getAttribute('position') as THREE.BufferAttribute | undefined;
       if (!posAttr) return;
-      const uvAttr = geo.getAttribute('uv') as THREE.BufferAttribute | undefined;
       const idxAttr = geo.getIndex();
 
-      const mat = Array.isArray(mesh.material) ? mesh.material[0] : mesh.material;
-      const matName = mat?.name || '';
-      const wm = mesh.matrixWorld;
-
       const getWorldVertex = (vIdx: number): [number, number, number] => {
-        if (modelId === 'fia_2026_concept') {
-          // Raw CAD coordinates are already exact FIA millimeters:
-          // rx = X_A (X_F - 55), ry = Y_FIA, rz = Z_FIA
-          const rx = posAttr.getX(vIdx);
-          const ry = posAttr.getY(vIdx);
-          const rz = posAttr.getZ(vIdx);
-          return [
-            ry * 0.001,
-            (rz + 30.8) * 0.001,
-            (rx + 55.0 - 1700.0) * 0.001,
-          ];
-        } else {
-          tmpVec.fromBufferAttribute(posAttr, vIdx).applyMatrix4(wm);
-          return [
-            -tmpVec.x * ferrariScale,
-            (tmpVec.y + ferrariGroundLift) * ferrariScale,
-            -(tmpVec.z - ferrariZMid) * ferrariScale,
-          ];
-        }
+        // Raw CAD coordinates are already exact FIA millimeters:
+        // rx = X_A (X_F - 55), ry = Y_FIA, rz = Z_FIA
+        const rx = posAttr.getX(vIdx);
+        const ry = posAttr.getY(vIdx);
+        const rz = posAttr.getZ(vIdx);
+        return [
+          ry * 0.001,
+          (rz + 30.8) * 0.001,
+          (rx + 55.0 - 1700.0) * 0.001,
+        ];
       };
 
       const sampleVertColor = (
-        vIdx: number,
         bucket: BucketId,
         wy: number,
         out: [number, number, number]
       ) => {
-        if (modelId === 'ferrari_sf26') {
-          const u = uvAttr ? uvAttr.getX(vIdx) : 0.5;
-          const v = uvAttr ? uvAttr.getY(vIdx) : 0.5;
-          texSampler.sampleMaterialColor(mat, u, v, out);
-        } else {
-          // Official FIA 2026 Concept Car realistic studio materials for wheels & chassis
-          if (bucket.startsWith('wheel_')) {
-            // Distinguish outer Pirelli tire rubber from inner 18" wheel aero drum/rim!
-            const yAxle = 0.3595;
-            // Use wy to shade rim vs tire carcass cleanly
-            const rFromAxle = Math.abs(wy - yAxle);
-            if (rFromAxle < 0.225) {
-              out[0] = 0.16;
-              out[1] = 0.18;
-              out[2] = 0.22;
-            } else {
-              out[0] = 0.09;
-              out[1] = 0.10;
-              out[2] = 0.115;
-            }
+        if (bucket.startsWith('wheel_')) {
+          const yAxle = 0.3595;
+          const rFromAxle = Math.abs(wy - yAxle);
+          if (rFromAxle < 0.225) {
+            out[0] = 0.16;
+            out[1] = 0.18;
+            out[2] = 0.22;
           } else {
-            // Static survival cell, wishbones, halo & roll hoop in gunmetal carbon
-            out[0] = 0.14;
-            out[1] = 0.155;
-            out[2] = 0.185;
+            out[0] = 0.09;
+            out[1] = 0.10;
+            out[2] = 0.115;
           }
+        } else {
+          // Static survival cell, wishbones, halo & roll hoop in gunmetal carbon
+          out[0] = 0.14;
+          out[1] = 0.155;
+          out[2] = 0.185;
         }
       };
 
@@ -500,7 +359,7 @@ export class CarModelLoader {
         const cy = (y0 + y1 + y2) / 3;
         const cz = (z0 + z1 + z2) / 3;
 
-        let bucketId = classifyTriangle(cx, cy, cz, modelId, matName);
+        let bucketId = classifyTriangle(cx, cy, cz);
         // FIA Art. 3.2.2: Ensure non-aero suspension/crash-structure triangles extending outside
         // the official Reference Volumes stay rigidly attached to static_chassis!
         if (
@@ -520,7 +379,7 @@ export class CarModelLoader {
         acc.positions.push(x0, y0, z0, x1, y1, z1, x2, y2, z2);
 
         if (acc.hasColors) {
-          if (modelId === 'fia_2026_concept' && bucketId.startsWith('wheel_')) {
+          if (bucketId.startsWith('wheel_')) {
             const zAxle = bucketId.includes('_f') ? -1.70 : 1.70;
             const yAxle = 0.3595;
             for (const [vy, vz, out] of [
@@ -545,9 +404,9 @@ export class CarModelLoader {
               }
             }
           } else {
-            sampleVertColor(i0, bucketId, y0, rgb0);
-            sampleVertColor(i1, bucketId, y1, rgb1);
-            sampleVertColor(i2, bucketId, y2, rgb2);
+            sampleVertColor(bucketId, y0, rgb0);
+            sampleVertColor(bucketId, y1, rgb1);
+            sampleVertColor(bucketId, y2, rgb2);
           }
           acc.colors.push(
             rgb0[0], rgb0[1], rgb0[2],

@@ -13,7 +13,7 @@ export interface Vec3 {
   z: number;
 }
 
-export type CarModelId = 'fia_2026_concept' | 'ferrari_sf26';
+export type CarModelId = 'fia_2026_concept';
 
 /**
  * 2026 FIA Active Aerodynamics Mode (Art. 3.10.9 Front Wing & Art. 3.11.6 Rear Wing):

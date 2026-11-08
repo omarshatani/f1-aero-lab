@@ -1,15 +1,18 @@
 import * as THREE from 'three';
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
 import { CFDVisualizer } from '../cfd/CFDVisualizer';
-import { CarModelLoader, LoadedCarAssembly } from '../geometry/CarModelLoader';
-import {
-  createReferenceChassis,
-  ReferenceChassisBuild,
-} from '../geometry/referenceChassis';
-import { buildPartGeometry } from '../geometry/splineSurface';
+import { ProceduralFixturesManager } from '../geometry/fixtures';
 import { checkPartLegality, PART_ORDER } from '../regulations/fia2026';
 import { CarProjectStore, MeshCFDData } from '../state/CarProjectStore';
-import { ActiveAeroMode, AeroPartData, CarModelId, PartId, Vec3 } from '../types/aero';
+import { LODManager } from '../surface/lod';
+import {
+  createBufferGeometryFromSurface,
+  evaluatePartSurface,
+  extractMeshPanelsAndLegality,
+  updateBufferGeometryFromSurface,
+  updateSurfaceColors,
+} from '../surface/PatchEvaluator';
+import { ActiveAeroMode, AeroPartData, FixtureId, PartId, Vec3 } from '../types/aero';
 import { LegalityVisualizer } from './LegalityVisualizer';
 import { PartSculptor } from './PartSculptor';
 
@@ -28,7 +31,7 @@ function computeGridSignature(
   clamp: boolean,
   aeroMode: ActiveAeroMode
 ): string {
-  const grid = part.grid;
+  const grid = part.cage?.detail ?? part.grid;
   let s = `${clamp ? 1 : 0}:${aeroMode}:`;
   for (let u = 0; u < grid.length; u++) {
     const col = grid[u];
@@ -57,14 +60,10 @@ export class SceneManager {
   public readonly cfdViz = new CFDVisualizer();
   public readonly sculptor: PartSculptor;
 
-  private readonly carAssembly = new THREE.Group();
-  private readonly fallbackChassis: ReferenceChassisBuild;
-  private readonly modelLoader = new CarModelLoader();
-  private readonly loadedModels = new Map<CarModelId, LoadedCarAssembly>();
-  private activeLoadedCar: LoadedCarAssembly | null = null;
-  private loadingModelToken = 0;
-  private activeCarModelId: CarModelId | null = null;
+  public readonly fixturesManager: ProceduralFixturesManager;
+  public readonly lodManager: LODManager;
 
+  private readonly carAssembly = new THREE.Group();
   private readonly partMeshes = new Map<PartId, THREE.Mesh>();
   private readonly partMaterials = new Map<PartId, THREE.MeshStandardMaterial>();
   private readonly lastPartSignatures = new Map<PartId, string>();
@@ -159,10 +158,14 @@ export class SceneManager {
 
     this.scene.add(this.carAssembly);
 
-    // Temporary lightweight fallback shown only during initial ~250ms GLB stream
-    this.fallbackChassis = createReferenceChassis();
-    this.carAssembly.add(this.fallbackChassis.root);
+    // 100% Procedural Vehicle Fixtures (Wheels, Halo, Mirrors, Driver, Cockpit, Exhaust)
+    this.fixturesManager = new ProceduralFixturesManager();
+    this.carAssembly.add(this.fixturesManager.root);
 
+    // LOD Manager for instant preview and worker-evaluated full LOD
+    this.lodManager = new LODManager();
+
+    // Initialize all 11 procedural component meshes
     for (const id of PART_ORDER) {
       const mat = new THREE.MeshStandardMaterial({
         vertexColors: true,
@@ -174,13 +177,18 @@ export class SceneManager {
       });
       this.partMaterials.set(id, mat);
 
-      const mesh = new THREE.Mesh(new THREE.BufferGeometry(), mat);
+      const previewSurface = this.lodManager.evaluatePreviewPart(
+        this.store.parts[id],
+        this.store.surfaceVizMode
+      );
+      const geom = createBufferGeometryFromSurface(previewSurface);
+      const mesh = new THREE.Mesh(geom, mat);
       mesh.userData = { partId: id };
       this.partMeshes.set(id, mesh);
       this.carAssembly.add(mesh);
     }
 
-    // Register real deformed 3D mesh provider for CFDSolver
+    // Register real deformed procedural 3D mesh provider for CFDSolver
     this.store.setMeshCFDDataProvider(() => this.extractActiveMeshCFDData());
 
     this.scene.add(this.legalityViz.root);
@@ -199,6 +207,21 @@ export class SceneManager {
           this.store.runCFD();
           this.recolorAllParts();
           this.store.emit();
+
+          // Dispatch background full-LOD tessellation in worker on drag release
+          void this.lodManager
+            .requestFullLOD(this.store.parts, this.store.surfaceVizMode)
+            .then((surfaces) => {
+              for (const pId of PART_ORDER) {
+                const s = surfaces[pId];
+                if (s) {
+                  const m = this.partMeshes.get(pId);
+                  if (m) {
+                    updateBufferGeometryFromSurface(m.geometry, s);
+                  }
+                }
+              }
+            });
         }
       }
     );
@@ -217,108 +240,32 @@ export class SceneManager {
     this.store.subscribe(() => this.syncFromStore());
     this.syncFromStore();
 
-    // Immediately load the Official FIA 2026 Concept Model as default car!
-    void this.ensureCarModelLoaded(this.store.carModelId, true);
+    // Initial CFD solve on baseline procedural car
+    this.store.runCFD();
+    if (!this.store.canUndo()) {
+      this.store.setCurrentAsBaseline('Official FIA 2026 Spec');
+    }
 
     this.animate();
   }
 
-  private extractActiveMeshCFDData(): MeshCFDData | null {
-    if (!this.activeLoadedCar) return null;
+  private extractActiveMeshCFDData(): MeshCFDData {
     const panels: MeshCFDData['panels'] = {};
     const legalityPts: MeshCFDData['legalityPts'] = {};
+
     for (const id of PART_ORDER) {
-      const ctrl = this.activeLoadedCar.partControllers[id];
-      panels[id] = ctrl.extractDeformedMacroPanels();
-      legalityPts[id] = ctrl.sampleDeformedPointsForLegality();
+      const mesh = this.partMeshes.get(id);
+      if (mesh) {
+        const extracted = extractMeshPanelsAndLegality(mesh);
+        panels[id] = extracted.panels;
+        legalityPts[id] = extracted.legalityPts;
+      }
     }
+
     return { panels, legalityPts };
   }
 
-  private async ensureCarModelLoaded(
-    modelId: CarModelId,
-    isInitialStartup = false
-  ): Promise<void> {
-    if (this.activeCarModelId === modelId && this.activeLoadedCar) return;
-    this.activeCarModelId = modelId;
-    const token = ++this.loadingModelToken;
-
-    let car = this.loadedModels.get(modelId);
-    if (!car) {
-      this.store.setModelLoading(true, 5, 'Loading 2026 F1 3D Model...');
-      try {
-        car = await this.modelLoader.loadCarModel(modelId, (pct, label) => {
-          if (token === this.loadingModelToken) {
-            this.store.setModelLoading(true, pct, label);
-          }
-        });
-        this.loadedModels.set(modelId, car);
-      } catch (err) {
-        console.error('Failed to load GLTF/GLB car model:', err);
-        if (token === this.loadingModelToken) {
-          this.store.setModelLoading(false, 100, '');
-        }
-        return;
-      }
-    }
-
-    if (token !== this.loadingModelToken) return;
-
-    // Detach previous car static/wheel groups if switching models
-    if (this.activeLoadedCar) {
-      this.carAssembly.remove(this.activeLoadedCar.staticChassisGroup);
-      for (const wg of this.activeLoadedCar.wheelGroups) {
-        this.carAssembly.remove(wg);
-      }
-    }
-
-    // Hide procedural placeholder chassis permanently once real 2026 car is mounted!
-    this.fallbackChassis.root.visible = false;
-
-    this.activeLoadedCar = car;
-    this.carAssembly.add(car.staticChassisGroup);
-    for (const wg of car.wheelGroups) {
-      this.carAssembly.add(wg);
-    }
-    this.activeLoadedCar.applyWheelStance?.(this.store.wheelStance);
-
-    // Bind each PartId's THREE.Mesh directly to its welded PartFFDController BufferGeometry
-    this.lastPartSignatures.clear();
-    for (const id of PART_ORDER) {
-      const mesh = this.partMeshes.get(id)!;
-      const oldGeo = mesh.geometry;
-      mesh.geometry = car.partControllers[id].geometry;
-      // Only dispose oldGeo if it wasn't owned by a cached PartFFDController
-      let ownedByCachedModel = false;
-      for (const cached of this.loadedModels.values()) {
-        if (cached.partControllers[id].geometry === oldGeo) {
-          ownedByCachedModel = true;
-          break;
-        }
-      }
-      if (!ownedByCachedModel) {
-        oldGeo.dispose();
-      }
-    }
-
-    // Apply current FFD deformations to all 7 parts, solve CFD on real 3D mesh, and refresh baseline if startup
-    for (const id of PART_ORDER) {
-      this.deformSinglePart(id, true);
-    }
-    this.store.runCFD();
-    if (isInitialStartup && !this.store.canUndo()) {
-      this.store.setCurrentAsBaseline('Official FIA 2026 Spec');
-    }
-    this.store.setModelLoading(false, 100, '');
-    this.syncFromStore();
-  }
-
   public syncFromStore(): void {
-    // Check if user switched 3D Car Model (FIA 2026 Concept vs Ferrari SF-26)
-    if (this.store.carModelId !== this.activeCarModelId) {
-      void this.ensureCarModelLoaded(this.store.carModelId, false);
-    }
-
     const isCfd = this.store.appMode === 'cfd';
 
     if (isCfd) {
@@ -333,6 +280,14 @@ export class SceneManager {
       this.carAssembly.rotation.set(0, 0, 0);
     }
 
+    // Update procedural fixtures
+    this.fixturesManager.applyWheelStance(this.store.wheelStance);
+    const ghostStatic = !isCfd && this.store.ghostOtherParts;
+    this.fixturesManager.setGhostMode(ghostStatic);
+    for (const [id, visible] of Object.entries(this.store.fixtures) as Array<[FixtureId, boolean]>) {
+      this.fixturesManager.setFixtureVisible(id, visible);
+    }
+
     for (const id of PART_ORDER) {
       this.deformSinglePart(id, false);
 
@@ -345,14 +300,6 @@ export class SceneManager {
     }
 
     this.recolorAllParts();
-
-    const ghostStatic = !isCfd && this.store.ghostOtherParts;
-    if (this.activeLoadedCar) {
-      this.activeLoadedCar.setGhostMode(ghostStatic);
-      this.activeLoadedCar.applyWheelStance?.(this.store.wheelStance);
-    } else {
-      this.fallbackChassis.setGhostMode(ghostStatic);
-    }
 
     this.legalityViz.setVisible(!isCfd && this.store.showFiaBox);
     if (!isCfd) {
@@ -376,68 +323,62 @@ export class SceneManager {
     const visualAeroMode: ActiveAeroMode =
       this.store.appMode === 'cfd' ? this.store.tunnelSettings.activeAeroMode : 'z_mode';
 
-    if (this.activeLoadedCar) {
-      const sig = computeGridSignature(part, this.store.clampToFiaBox, visualAeroMode);
-      if (!force && this.lastPartSignatures.get(partId) === sig) {
-        return;
-      }
-      this.lastPartSignatures.set(partId, sig);
+    const sig = computeGridSignature(part, this.store.clampToFiaBox, visualAeroMode);
+    if (!force && this.lastPartSignatures.get(partId) === sig) {
+      return;
+    }
+    this.lastPartSignatures.set(partId, sig);
 
-      const ctrl = this.activeLoadedCar.partControllers[partId];
-      ctrl.syncProceduralGeometry?.(part);
-      ctrl.applyDeformation(
-        part.grid,
-        part.legalityBoxes,
-        this.store.clampToFiaBox,
-        visualAeroMode
-      );
-      ctrl.applySurfaceColors(
-        this.store.surfaceVizMode,
-        part.accentHex,
-        this.store.cfdResult.partSurfaceMaps[partId],
-        this.store.appMode === 'sculpt' && partId === this.store.activePartId
-      );
-    } else {
-      // Fallback spline shell only during initial ~250ms stream
-      const cpMap = this.store.cfdResult.partSurfaceMaps[partId];
-      const { geometry } = buildPartGeometry(part, this.store.surfaceVizMode, cpMap);
-      const mesh = this.partMeshes.get(partId)!;
-      mesh.geometry.dispose();
-      mesh.geometry = geometry;
+    const cpMap = this.store.cfdResult.partSurfaceMaps[partId];
+    const surface = evaluatePartSurface(
+      part,
+      'preview',
+      this.store.surfaceVizMode,
+      cpMap,
+      visualAeroMode
+    );
+
+    const mesh = this.partMeshes.get(partId);
+    if (mesh) {
+      updateBufferGeometryFromSurface(mesh.geometry, surface);
     }
   }
 
   private recolorAllParts(): void {
-    if (!this.activeLoadedCar) return;
     for (const id of PART_ORDER) {
       const part = this.store.parts[id];
-      const ctrl = this.activeLoadedCar.partControllers[id];
-      ctrl.applySurfaceColors(
-        this.store.surfaceVizMode,
-        part.accentHex,
-        this.store.cfdResult.partSurfaceMaps[id],
-        this.store.appMode === 'sculpt' && id === this.store.activePartId
-      );
+      const mesh = this.partMeshes.get(id);
+      if (mesh) {
+        const isSelected = this.store.appMode === 'sculpt' && id === this.store.activePartId;
+        updateSurfaceColors(
+          mesh.geometry,
+          part,
+          this.store.surfaceVizMode,
+          this.store.cfdResult.partSurfaceMaps[id],
+          isSelected
+        );
+      }
     }
   }
 
   private updateActiveLegalityVisuals(): void {
     const active = this.store.getActivePart();
-    let samplePts: Vec3[];
-    if (this.activeLoadedCar) {
-      samplePts =
-        this.activeLoadedCar.partControllers[active.id].sampleDeformedPointsForLegality();
-    } else {
-      const mesh = this.partMeshes.get(active.id)!;
-      const posAttr = mesh.geometry.getAttribute('position') as THREE.BufferAttribute;
-      samplePts = [];
-      for (let i = 0; i < posAttr.count; i += 4) {
-        const x = posAttr.getX(i);
-        if (x >= -0.001) {
-          samplePts.push({ x: Math.max(0, x), y: posAttr.getY(i), z: posAttr.getZ(i) });
+    const mesh = this.partMeshes.get(active.id);
+    const samplePts: Vec3[] = [];
+
+    if (mesh) {
+      const posAttr = mesh.geometry.getAttribute('position') as THREE.BufferAttribute | undefined;
+      if (posAttr) {
+        const stride = Math.max(1, Math.floor(posAttr.count / 80));
+        for (let i = 0; i < posAttr.count; i += stride) {
+          const x = posAttr.getX(i);
+          if (x >= -0.001) {
+            samplePts.push({ x: Math.max(0, x), y: posAttr.getY(i), z: posAttr.getZ(i) });
+          }
         }
       }
     }
+
     const check = checkPartLegality(active, samplePts);
     this.legalityViz.rebuildForPart(active.legalityBoxes, check.isLegal);
   }
@@ -666,21 +607,38 @@ export class SceneManager {
     this.orbitControls.update();
 
     const spinActive = this.store.appMode === 'cfd';
-    if (this.activeLoadedCar) {
-      this.activeLoadedCar.updateWheelSpin(
-        dt,
-        this.store.tunnelSettings.windSpeedKmh,
-        spinActive
-      );
-    } else {
-      this.fallbackChassis.updateWheelSpin(
-        dt,
-        this.store.tunnelSettings.windSpeedKmh,
-        spinActive
-      );
-    }
+    this.fixturesManager.updateWheelSpin(
+      dt,
+      this.store.tunnelSettings.windSpeedKmh,
+      spinActive
+    );
 
     this.cfdViz.updateAnimation(dt);
     this.renderer.render(this.scene, this.camera);
   };
+
+  public dispose(): void {
+    window.removeEventListener('resize', this.onResize);
+    window.removeEventListener('keydown', this.onKeyDown);
+    window.removeEventListener('keyup', this.onKeyUp);
+    window.removeEventListener('blur', this.clearMovementState);
+    this.renderer.domElement.removeEventListener('pointerdown', this.onCanvasPointerDown);
+
+    this.lodManager.dispose();
+    this.fixturesManager.dispose();
+    this.sculptor.transformControls.detach();
+    this.sculptor.setVisible(false);
+    this.legalityViz.clear();
+
+    for (const mesh of this.partMeshes.values()) {
+      mesh.geometry.dispose();
+    }
+    for (const mat of this.partMaterials.values()) {
+      mat.dispose();
+    }
+    this.partMeshes.clear();
+    this.partMaterials.clear();
+    this.lastPartSignatures.clear();
+    this.renderer.dispose();
+  }
 }

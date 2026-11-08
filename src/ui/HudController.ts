@@ -4,7 +4,6 @@ import { PART_ORDER, signedMarginInUnion, worldToFiaMm } from '../regulations/fi
 import { CarProjectStore } from '../state/CarProjectStore';
 import {
   ActiveAeroMode,
-  CarModelId,
   PartId,
   SculptSelectMode,
   StreamlineColorMode,
@@ -518,17 +517,6 @@ export class HudController {
       </div>
 
       <div class="topbar-actions">
-        <label class="car-select-wrap" title="Switch 2026 3D Base Model">
-          <span>2026 Base:</span>
-          <select id="sel-car-model" class="car-select">
-            <option value="fia_2026_concept" ${
-              this.store.carModelId === 'fia_2026_concept' ? 'selected' : ''
-            }>FIA 2026 Official Concept</option>
-            <option value="ferrari_sf26" ${
-              this.store.carModelId === 'ferrari_sf26' ? 'selected' : ''
-            }>Ferrari SF-26 (2026)</option>
-          </select>
-        </label>
         <button class="btn btn-sm" id="top-undo" ${this.store.canUndo() ? '' : 'disabled'} title="Ctrl+Z">Undo</button>
         <button class="btn btn-sm" id="top-redo" ${this.store.canRedo() ? '' : 'disabled'} title="Ctrl+Y">Redo</button>
         <button class="btn btn-sm" id="top-export">Save</button>
@@ -542,12 +530,6 @@ export class HudController {
     this.topbarEl.querySelector('#top-mode-cfd')!.addEventListener('click', () => {
       this.store.setAppMode('cfd');
     });
-    this.topbarEl
-      .querySelector<HTMLSelectElement>('#sel-car-model')!
-      .addEventListener('change', (e) => {
-        const val = (e.target as HTMLSelectElement).value as CarModelId;
-        this.store.setCarModelId(val);
-      });
     this.topbarEl.querySelector('#top-undo')!.addEventListener('click', () => this.store.undo());
     this.topbarEl.querySelector('#top-redo')!.addEventListener('click', () => this.store.redo());
     this.topbarEl

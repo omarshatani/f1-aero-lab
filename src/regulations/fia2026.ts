@@ -4,18 +4,34 @@ import {
   LegalityCheckResult,
   NodeIndex,
   PartId,
+  PartParamSlider,
+  ProceduralElementConfig,
   Vec3,
+  WheelStanceSettings,
 } from '../types/aero';
 
 export const PART_ORDER: PartId[] = [
   'front_wing',
   'nosecone',
+  'front_suspension',
+  'monocoque',
   'floor_boards',
   'floor',
   'sidepods',
+  'engine_cover',
+  'rear_suspension',
   'diffuser',
   'rear_wing',
 ];
+
+export const DEFAULT_WHEEL_STANCE: WheelStanceSettings = {
+  frontTrackOffsetMm: 0,
+  rearTrackOffsetMm: 0,
+  frontCamberDeg: -3.0,
+  rearCamberDeg: -2.0,
+  frontToeDeg: 0.15,
+  rimCoverDishMm: 0,
+};
 
 /**
  * Official 2026 FIA Technical Regulations (Art. 2.6 - 2.8) Datum Constants:
@@ -327,19 +343,112 @@ export function cloneGrid(grid: Vec3[][]): Vec3[][] {
   return grid.map((col) => col.map((pt) => ({ x: pt.x, y: pt.y, z: pt.z })));
 }
 
+export function cloneProceduralElements(
+  elements: ProceduralElementConfig[]
+): ProceduralElementConfig[] {
+  return elements.map((el) => ({ ...el }));
+}
+
+function initDefaultParamValues(sliders: PartParamSlider[]): Record<string, number> {
+  const out: Record<string, number> = {};
+  for (const s of sliders) {
+    out[s.id] = s.defaultValue;
+  }
+  return out;
+}
+
 const fiaGrid = (ptsFiaMm: Array<Array<[number, number, number]>>): Vec3[][] =>
   ptsFiaMm.map((col) => col.map(([xF, yFia, zFia]) => fiaMmToWorld(xF, yFia, zFia)));
 
 /**
- * Create the official FIA 2026 baseline aerodynamic parts, Reference Volumes (Appendix 1),
- * and 3D Free-Form Deformation (FFD) control lattices matching the FIA 2026 Concept Car.
+ * Apply engineering parameter sliders (Pitch/AoA, Camber/Arch, Span Flare, Undercut/Height)
+ * onto a base control lattice grid[u][v], optionally clamping to FIA Reference Volumes.
+ */
+export function applyParametricOffsetsToGrid(
+  baseGrid: Vec3[][],
+  part: AeroPartData,
+  paramValues: Record<string, number>,
+  clampToFia = true
+): Vec3[][] {
+  const out = cloneGrid(baseGrid);
+  const cols = part.cols;
+  const rows = part.rows;
+
+  const pitchDeg = paramValues.pitchDeg ?? 0;
+  const camberMm = paramValues.camberMm ?? 0;
+  const flareMm = paramValues.flareMm ?? 0;
+  const heightMm = paramValues.heightMm ?? 0;
+
+  const pitchRad = (pitchDeg * Math.PI) / 180;
+  const camberM = camberMm * 0.001;
+  const flareM = flareMm * 0.001;
+  const heightM = heightMm * 0.001;
+
+  for (let u = 0; u < cols; u++) {
+    const su = cols > 1 ? u / (cols - 1) : 0;
+    const zPivot = 0.5 * (baseGrid[u][0].z + baseGrid[u][rows - 1].z);
+    const yPivot = 0.5 * (baseGrid[u][0].y + baseGrid[u][rows - 1].y);
+
+    for (let v = 0; v < rows; v++) {
+      const sv = rows > 1 ? v / (rows - 1) : 0;
+      const pt = out[u][v];
+
+      // 1. Pitch rotation around local chord midpoint (trailing edge rises for +pitchDeg)
+      if (Math.abs(pitchRad) > 1e-5) {
+        const dz = pt.z - zPivot;
+        const dy = pt.y - yPivot;
+        const cosP = Math.cos(pitchRad);
+        const sinP = Math.sin(pitchRad);
+        pt.y = yPivot + dy * cosP + dz * sinP;
+        pt.z = zPivot - dy * sinP + dz * cosP;
+      }
+
+      // 2. Mid-chord camber arch (peaks at sv = 0.5)
+      if (Math.abs(camberM) > 1e-5) {
+        const arch = Math.sin(Math.PI * sv);
+        pt.y += camberM * arch;
+      }
+
+      // 3. Lateral span/outwash flare (scales with su away from centerline)
+      if (Math.abs(flareM) > 1e-5 && !(part.centerlineLocked && u === 0)) {
+        const spanWeight = part.centerlineLocked ? su : 0.35 + 0.65 * su;
+        pt.x = Math.max(0.001, pt.x + flareM * spanWeight);
+      }
+
+      // 4. Vertical trim / undercut height offset
+      if (Math.abs(heightM) > 1e-5) {
+        pt.y += heightM;
+      }
+
+      if (clampToFia) {
+        out[u][v] = clampPointToLegalityBoxes(
+          pt,
+          part.legalityBoxes,
+          part.centerlineLocked && u === 0
+        );
+      }
+    }
+  }
+
+  return out;
+}
+
+/**
+ * Create the official FIA 2026 baseline aerodynamic, chassis, and suspension parts (11 components),
+ * Reference Volumes (Appendix 1), Sub-Zones, Parametric Sliders, and Procedural Aero Elements.
  */
 export function createBaselineParts(): Record<PartId, AeroPartData> {
+  const makePart = (spec: Omit<AeroPartData, 'paramValues'>): AeroPartData => ({
+    ...spec,
+    paramValues: initDefaultParamValues(spec.paramSliders),
+  });
+
   return {
-    front_wing: {
+    front_wing: makePart({
       id: 'front_wing',
       name: 'Front Wing, Endplate & Footplate',
       shortName: 'Front Wing',
+      category: 'aero',
       articleRef: 'FIA 2026 Art. 3.10 (RV-FW)',
       description:
         'Narrower 1800mm 2026 3-element wing with active flap (Y<=580mm) and footplate fence. Shapes front axle load and tire wake.',
@@ -395,35 +504,30 @@ export function createBaselineParts(): Record<PartId, AeroPartData> {
       cols: 5,
       rows: 4,
       grid: fiaGrid([
-        // u=0: Centerline spoon (Y=0)
         [
           [-1190, 0, 82],
           [-990, 0, 108],
           [-790, 0, 148],
           [-600, 0, 195],
         ],
-        // u=1: Inboard active-flap span (Y=275)
         [
           [-1130, 275, 90],
           [-940, 275, 122],
           [-755, 275, 175],
           [-570, 275, 232],
         ],
-        // u=2: Mid-outboard cascade (Y=540)
         [
           [-1045, 540, 112],
           [-875, 540, 145],
           [-705, 540, 198],
           [-535, 540, 258],
         ],
-        // u=3: Endplate base & diveplane junction (Y=670)
         [
           [-985, 670, 130],
           [-815, 670, 162],
           [-640, 670, 215],
           [-465, 670, 275],
         ],
-        // u=4: Upper endplate & Y=900 footplate wingtip
         [
           [-950, 820, 230],
           [-790, 845, 275],
@@ -431,15 +535,64 @@ export function createBaselineParts(): Record<PartId, AeroPartData> {
           [-455, 880, 355],
         ],
       ]),
-    },
+      subZones: [
+        {
+          id: 'fw_spoon',
+          label: 'Inboard Spoon',
+          description: 'Central neutral spoon & under-nose channel (u=0..1)',
+          uIndices: [0, 1],
+          vIndices: [0, 1, 2, 3],
+        },
+        {
+          id: 'fw_active_flaps',
+          label: 'Active Upper Flaps',
+          description: 'Movable Z/X-Mode 2nd & 3rd flap cascade (v=2..3)',
+          uIndices: [0, 1, 2, 3],
+          vIndices: [2, 3],
+        },
+        {
+          id: 'fw_endplate',
+          label: 'Endplate & Footplate',
+          description: 'Outboard RV-FWEP endplate & tire-wake footplate (u=3..4)',
+          uIndices: [3, 4],
+          vIndices: [0, 1, 2, 3],
+        },
+      ],
+      paramSliders: [
+        { id: 'pitchDeg', label: 'Cascade AoA Pitch', unit: '°', min: -6, max: 6, step: 0.5, defaultValue: 0 },
+        { id: 'camberMm', label: 'Spoon & Flap Camber', unit: 'mm', min: -25, max: 25, step: 1, defaultValue: 0 },
+        { id: 'flareMm', label: 'Endplate Outwash Flare', unit: 'mm', min: -20, max: 22, step: 1, defaultValue: 0 },
+      ],
+      proceduralElements: [
+        {
+          id: 'fw_diveplane',
+          label: 'Endplate Outwash Diveplane',
+          enabled: true,
+          pitchDeg: 11,
+          scale: 1.0,
+          count: 1,
+          minCount: 1,
+          maxCount: 2,
+        },
+        {
+          id: 'fw_gurney',
+          label: 'Upper Flap Gurney Lip',
+          enabled: false,
+          pitchDeg: 0,
+          scale: 1.0,
+          count: 1,
+        },
+      ],
+    }),
 
-    nosecone: {
+    nosecone: makePart({
       id: 'nosecone',
-      name: 'Nosecone & Wing Pylons',
+      name: 'Nosecone, Cape & Wing Pylons',
       shortName: 'Nosecone',
+      category: 'aero',
       articleRef: 'FIA 2026 Art. 3.7.1 (RV-NOSE)',
       description:
-        'Impact structure fairing and twin front-wing pylons. Channels clean high-energy flow beneath the front bulkhead into the floor bib.',
+        'Impact structure fairing, twin front-wing pylons, and under-nose cape. Channels clean flow beneath the front bulkhead into the floor bib.',
       role: 'body_fairing',
       accentHex: '#38bdf8',
       centerlineLocked: true,
@@ -449,49 +602,46 @@ export function createBaselineParts(): Record<PartId, AeroPartData> {
           id: 'rv_nose_main',
           label: 'RV-NOSE Tapered Fairing',
           xFFront: -1300,
-          xFRear: 75,
+          xFRear: 115,
           yMinFront: 0,
-          yMaxFront: 165,
+          yMaxFront: 220,
           yMinRear: 0,
-          yMaxRear: 268,
+          yMaxRear: 390,
           zMinFront: 115,
-          zMaxFront: 310,
-          zMinRear: 185,
+          zMaxFront: 350,
+          zMinRear: 175,
           zMaxRear: 645,
         }),
         makeFiaBox({
           id: 'rv_fw_pylon',
           label: 'RV-FW-PYLON Mounts',
           xFFront: -1240,
-          xFRear: -780,
+          xFRear: -650,
           yMinFront: 0,
-          yMaxFront: 160,
+          yMaxFront: 185,
           yMinRear: 0,
-          yMaxRear: 165,
+          yMaxRear: 220,
           zMinFront: 60,
-          zMaxFront: 240,
+          zMaxFront: 260,
           zMinRear: 85,
-          zMaxRear: 280,
+          zMaxRear: 320,
         }),
       ],
       cols: 3,
       rows: 4,
       grid: fiaGrid([
-        // u=0: Upper nose spine (Y=0)
         [
           [-1220, 0, 195],
           [-820, 0, 315],
           [-380, 0, 455],
           [20, 0, 565],
         ],
-        // u=1: Nose mid-shoulder
         [
           [-1190, 95, 175],
           [-800, 135, 285],
           [-370, 175, 415],
           [20, 210, 520],
         ],
-        // u=2: Lower pylon / keel flank
         [
           [-1150, 115, 125],
           [-790, 155, 205],
@@ -499,12 +649,236 @@ export function createBaselineParts(): Record<PartId, AeroPartData> {
           [20, 230, 345],
         ],
       ]),
-    },
+      subZones: [
+        {
+          id: 'nose_tip_pylons',
+          label: 'Nose Tip & Pylons',
+          description: 'Forward impact tip and twin wing mounting pylons (v=0..1)',
+          uIndices: [0, 1, 2],
+          vIndices: [0, 1],
+        },
+        {
+          id: 'nose_cape_keel',
+          label: 'Under-Nose Keel',
+          description: 'Lower keel & cape feeding the floor tea-tray (u=2)',
+          uIndices: [1, 2],
+          vIndices: [1, 2, 3],
+        },
+        {
+          id: 'nose_bulkhead',
+          label: 'Bulkhead Transition',
+          description: 'Upper nose deck joining the survival cell (v=2..3)',
+          uIndices: [0, 1, 2],
+          vIndices: [2, 3],
+        },
+      ],
+      paramSliders: [
+        { id: 'pitchDeg', label: 'Nose Droop Angle', unit: '°', min: -4, max: 4, step: 0.5, defaultValue: 0 },
+        { id: 'heightMm', label: 'Under-Nose Clearance', unit: 'mm', min: -25, max: 25, step: 1, defaultValue: 0 },
+        { id: 'flareMm', label: 'Cape Cheek Width', unit: 'mm', min: -20, max: 20, step: 1, defaultValue: 0 },
+      ],
+      proceduralElements: [
+        {
+          id: 'nose_cape_vanes',
+          label: 'Under-Nose Turning Vanes',
+          enabled: false,
+          pitchDeg: 8,
+          scale: 1.0,
+          count: 1,
+        },
+      ],
+    }),
 
-    floor_boards: {
+    front_suspension: makePart({
+      id: 'front_suspension',
+      name: 'Front Suspension & Brake Ducts',
+      shortName: 'Front Susp',
+      category: 'suspension',
+      articleRef: 'FIA 2026 Art. 3.13 / 10 (RV-FBD)',
+      description:
+        'Front carbon wishbone aero fairings, pushrod/trackrod shrouds, and inboard front brake cooling scoops & cake-tin deflectors.',
+      role: 'suspension',
+      accentHex: '#06b6d4',
+      centerlineLocked: false,
+      thickness: 0.018,
+      legalityBoxes: [
+        makeFiaBox({
+          id: 'rv_susp_front_arms',
+          label: 'RV-SUSP-FRONT Wishbone Envelope',
+          xFFront: -330,
+          xFRear: 475,
+          yMinFront: 140,
+          yMaxFront: 620,
+          yMinRear: 140,
+          yMaxRear: 620,
+          zMinFront: 80,
+          zMaxFront: 550,
+          zMinRear: 80,
+          zMaxRear: 550,
+        }),
+      ],
+      cols: 3,
+      rows: 3,
+      grid: fiaGrid([
+        // u=0: Inboard chassis pick-ups
+        [
+          [-210, 215, 290],
+          [60, 235, 340],
+          [320, 250, 385],
+        ],
+        // u=1: Mid-span wishbone & pushrod fairings
+        [
+          [-180, 395, 315],
+          [40, 405, 355],
+          [260, 410, 395],
+        ],
+        // u=2: Outboard upright & front brake duct scoop
+        [
+          [-160, 565, 335],
+          [20, 575, 365],
+          [210, 565, 415],
+        ],
+      ]),
+      subZones: [
+        {
+          id: 'fsusp_inboard',
+          label: 'Inboard Pick-Ups',
+          description: 'Monocoque suspension pick-up fairings (u=0)',
+          uIndices: [0],
+          vIndices: [0, 1, 2],
+        },
+        {
+          id: 'fsusp_wishbones',
+          label: 'Wishbone Cascade',
+          description: 'Upper & lower carbon wishbone downwash profiles (u=1)',
+          uIndices: [1],
+          vIndices: [0, 1, 2],
+        },
+        {
+          id: 'fsusp_brake_duct',
+          label: 'Brake Scoop & Upright',
+          description: 'Outboard front brake cooling scoop & deflector (u=2)',
+          uIndices: [2],
+          vIndices: [0, 1, 2],
+        },
+      ],
+      paramSliders: [
+        { id: 'pitchDeg', label: 'Wishbone Anti-Dive Pitch', unit: '°', min: -5, max: 5, step: 0.5, defaultValue: 0 },
+        { id: 'heightMm', label: 'Roll-Center Height Offset', unit: 'mm', min: -20, max: 20, step: 1, defaultValue: 0 },
+        { id: 'flareMm', label: 'Brake Scoop Width', unit: 'mm', min: -18, max: 18, step: 1, defaultValue: 0 },
+      ],
+      proceduralElements: [
+        {
+          id: 'fsusp_duct_winglet',
+          label: 'Brake Duct Outwash Winglet',
+          enabled: true,
+          pitchDeg: 9,
+          scale: 1.0,
+          count: 2,
+          minCount: 1,
+          maxCount: 3,
+        },
+      ],
+    }),
+
+    monocoque: makePart({
+      id: 'monocoque',
+      name: 'Monocoque Tub, Cockpit, Halo & Mirrors',
+      shortName: 'Monocoque & Halo',
+      category: 'body',
+      articleRef: 'FIA 2026 Art. 3.6 / 12 (RV-CHASSIS)',
+      description:
+        'Homologated carbon survival cell, cockpit coaming, titanium Halo safety fairing, and aerodynamic rearview mirror housings.',
+      role: 'chassis_body',
+      accentHex: '#64748b',
+      centerlineLocked: true,
+      thickness: 0.04,
+      legalityBoxes: [
+        makeFiaBox({
+          id: 'rv_chassis_monocoque',
+          label: 'RV-CHASSIS Survival Cell & Halo',
+          xFFront: -420,
+          xFRear: 1680,
+          yMinFront: 0,
+          yMaxFront: 895,
+          yMinRear: 0,
+          yMaxRear: 895,
+          zMinFront: 25,
+          zMaxFront: 870,
+          zMinRear: 25,
+          zMaxRear: 870,
+        }),
+      ],
+      cols: 3,
+      rows: 4,
+      grid: fiaGrid([
+        // u=0: Centerline spine & Halo central pillar (Y=0)
+        [
+          [-150, 0, 520],
+          [420, 0, 650],
+          [1020, 0, 740],
+          [1560, 0, 780],
+        ],
+        // u=1: Survival cell upper shoulder & Halo hoop
+        [
+          [-120, 225, 480],
+          [440, 245, 595],
+          [1040, 250, 665],
+          [1560, 240, 680],
+        ],
+        // u=2: Lower tub flank & outboard mirror pod zone
+        [
+          [-80, 250, 260],
+          [460, 320, 380],
+          [1040, 560, 640],
+          [1540, 310, 460],
+        ],
+      ]),
+      subZones: [
+        {
+          id: 'mono_bulkhead',
+          label: 'Forward Tub & Bulkhead',
+          description: 'Front survival cell shoulders behind nosecone (v=0..1)',
+          uIndices: [0, 1, 2],
+          vIndices: [0, 1],
+        },
+        {
+          id: 'mono_halo_cockpit',
+          label: 'Cockpit & Halo Hoop',
+          description: 'Titanium Halo fairing & cockpit head protection (u=0..1, v=1..3)',
+          uIndices: [0, 1],
+          vIndices: [1, 2, 3],
+        },
+        {
+          id: 'mono_mirrors',
+          label: 'Mirrors & Tub Flanks',
+          description: 'Outboard rearview mirror stalks & lower tub sides (u=2)',
+          uIndices: [2],
+          vIndices: [1, 2, 3],
+        },
+      ],
+      paramSliders: [
+        { id: 'pitchDeg', label: 'Halo & Coaming Rake', unit: '°', min: -3, max: 3, step: 0.5, defaultValue: 0 },
+        { id: 'camberMm', label: 'Cockpit Coaming Arch', unit: 'mm', min: -20, max: 20, step: 1, defaultValue: 0 },
+        { id: 'flareMm', label: 'Mirror Stalk Span', unit: 'mm', min: -25, max: 25, step: 1, defaultValue: 0 },
+      ],
+      proceduralElements: [
+        {
+          id: 'mono_halo_boomerang',
+          label: 'Halo Boomerang Conditioning Vane',
+          enabled: false,
+          pitchDeg: 6,
+          scale: 1.0,
+          count: 1,
+        },
+      ],
+    }),
+
+    floor_boards: makePart({
       id: 'floor_boards',
       name: '2026 Wake-Control Floor Boards',
       shortName: 'Floor Boards',
+      category: 'aero',
       articleRef: 'FIA 2026 Art. 3.5.4 (RV-FLOOR-BOARD)',
       description:
         'Signature 2026 outboard 3-slat wake deflectors ahead of the sidepods. Designed to push turbulent front-tire wake inward/downward cleanly.',
@@ -517,24 +891,24 @@ export function createBaselineParts(): Record<PartId, AeroPartData> {
           id: 'rv_floor_board',
           label: 'RV-FLOOR-BOARD Slat Zone',
           xFFront: 605,
-          xFRear: 1555,
-          yMinFront: 655,
+          xFRear: 1750,
+          yMinFront: 560,
           yMaxFront: 904,
-          yMinRear: 655,
+          yMinRear: 560,
           yMaxRear: 904,
           zMinFront: 30,
-          zMaxFront: 432,
+          zMaxFront: 455,
           zMinRear: 30,
-          zMaxRear: 410,
+          zMaxRear: 455,
         }),
         makeFiaBox({
           id: 'rv_floor_foot',
           label: 'RV-FLOOR-FOOT Footplate',
           xFFront: 605,
-          xFRear: 1555,
-          yMinFront: 575,
+          xFRear: 1750,
+          yMinFront: 560,
           yMaxFront: 904,
-          yMinRear: 575,
+          yMinRear: 560,
           yMaxRear: 904,
           zMinFront: -2,
           zMaxFront: 148,
@@ -545,21 +919,18 @@ export function createBaselineParts(): Record<PartId, AeroPartData> {
       cols: 3,
       rows: 4,
       grid: fiaGrid([
-        // u=0: Footplate / lower board root
         [
           [720, 680, 55],
           [980, 720, 55],
           [1220, 735, 55],
           [1440, 720, 55],
         ],
-        // u=1: Mid-height wake vane cascade
         [
           [740, 760, 195],
           [990, 815, 195],
           [1230, 835, 185],
           [1445, 790, 175],
         ],
-        // u=2: Upper wake deflector slat crest
         [
           [760, 790, 345],
           [1000, 850, 350],
@@ -567,12 +938,53 @@ export function createBaselineParts(): Record<PartId, AeroPartData> {
           [1450, 825, 310],
         ],
       ]),
-    },
+      subZones: [
+        {
+          id: 'fb_footplate',
+          label: 'Lower Footplate Shelf',
+          description: 'Horizontal vortex-generating footplate base (u=0)',
+          uIndices: [0],
+          vIndices: [0, 1, 2, 3],
+        },
+        {
+          id: 'fb_leading_slats',
+          label: 'Leading Wake Slats',
+          description: 'Forward tire-wake capture vanes (v=0..1)',
+          uIndices: [1, 2],
+          vIndices: [0, 1],
+        },
+        {
+          id: 'fb_trailing_cascade',
+          label: 'Trailing Inwash Vanes',
+          description: 'Aft deflector slats guiding flow around sidepods (v=2..3)',
+          uIndices: [1, 2],
+          vIndices: [2, 3],
+        },
+      ],
+      paramSliders: [
+        { id: 'flareMm', label: 'Vane Inwash/Outwash Yaw', unit: 'mm', min: -35, max: 30, step: 1, defaultValue: 0 },
+        { id: 'pitchDeg', label: 'Slat Vertical Rake', unit: '°', min: -5, max: 5, step: 0.5, defaultValue: 0 },
+        { id: 'camberMm', label: 'Cascade Curvature', unit: 'mm', min: -25, max: 25, step: 1, defaultValue: 0 },
+      ],
+      proceduralElements: [
+        {
+          id: 'fb_aux_slat',
+          label: 'Upper Wake Deflector Slat',
+          enabled: true,
+          pitchDeg: -8,
+          scale: 1.0,
+          count: 2,
+          minCount: 1,
+          maxCount: 3,
+        },
+      ],
+    }),
 
-    floor: {
+    floor: makePart({
       id: 'floor',
       name: 'Main Floor, Bib & Edge Bodywork',
       shortName: 'Main Floor',
+      category: 'aero',
       articleRef: 'FIA 2026 Art. 3.5.1 (RV-FLOOR-BODY)',
       description:
         '2026 flatter step-plane underbody, central bib ("tea-tray") and lateral floor edges. Generates low-drag ground-effect suction ahead of the diffuser.',
@@ -584,36 +996,35 @@ export function createBaselineParts(): Record<PartId, AeroPartData> {
         makeFiaBox({
           id: 'rv_floor_bib',
           label: 'RV-FLOOR-BIB Tea-Tray',
-          xFFront: 350,
+          xFFront: 330,
           xFRear: 1150,
           yMinFront: 0,
-          yMaxFront: 265,
+          yMaxFront: 320,
           yMinRear: 0,
-          yMaxRear: 450,
+          yMaxRear: 480,
           zMinFront: -10,
-          zMaxFront: 170,
+          zMaxFront: 185,
           zMinRear: -10,
-          zMaxRear: 195,
+          zMaxRear: 215,
         }),
         makeFiaBox({
           id: 'rv_floor_body_main',
           label: 'RV-FLOOR-BODY Step Plane',
-          xFFront: 635,
-          xFRear: 2765,
+          xFFront: 600,
+          xFRear: 3075,
           yMinFront: 0,
           yMaxFront: 775,
           yMinRear: 0,
-          yMaxRear: 725,
+          yMaxRear: 755,
           zMinFront: -10,
-          zMaxFront: 225,
+          zMaxFront: 230,
           zMinRear: -10,
-          zMaxRear: 195,
+          zMaxRear: 230,
         }),
       ],
       cols: 4,
       rows: 5,
       grid: fiaGrid([
-        // u=0: Plank & centerline keel (Y=0)
         [
           [480, 0, 18],
           [1050, 0, 12],
@@ -621,7 +1032,6 @@ export function createBaselineParts(): Record<PartId, AeroPartData> {
           [2180, 0, 12],
           [2700, 0, 18],
         ],
-        // u=1: Inner step-plane tunnel roof
         [
           [760, 260, 85],
           [1180, 310, 68],
@@ -629,7 +1039,6 @@ export function createBaselineParts(): Record<PartId, AeroPartData> {
           [2200, 300, 60],
           [2700, 280, 68],
         ],
-        // u=2: Mid-floor suction channel
         [
           [820, 510, 88],
           [1220, 540, 66],
@@ -637,7 +1046,6 @@ export function createBaselineParts(): Record<PartId, AeroPartData> {
           [2220, 520, 58],
           [2700, 480, 65],
         ],
-        // u=3: Outer floor edge & vortex seal lip (Y~735 -> 680)
         [
           [900, 730, 62],
           [1300, 745, 48],
@@ -646,15 +1054,64 @@ export function createBaselineParts(): Record<PartId, AeroPartData> {
           [2700, 685, 50],
         ],
       ]),
-    },
+      subZones: [
+        {
+          id: 'floor_bib_inlet',
+          label: 'Bib & Tunnel Inlet',
+          description: 'Forward tea-tray bib & leading Venturi fences (v=0..1)',
+          uIndices: [0, 1, 2, 3],
+          vIndices: [0, 1],
+        },
+        {
+          id: 'floor_throat',
+          label: 'Venturi Suction Throat',
+          description: 'Mid-floor peak suction step-plane roof (u=1..2, v=1..3)',
+          uIndices: [1, 2],
+          vIndices: [1, 2, 3],
+        },
+        {
+          id: 'floor_edge_wing',
+          label: 'Lateral Floor Edge',
+          description: 'Outboard vortex-sealing floor edge lip (u=3)',
+          uIndices: [3],
+          vIndices: [0, 1, 2, 3, 4],
+        },
+      ],
+      paramSliders: [
+        { id: 'camberMm', label: 'Venturi Throat Roof Arch', unit: 'mm', min: -22, max: 25, step: 1, defaultValue: 0 },
+        { id: 'heightMm', label: 'Step-Plane Vertical Trim', unit: 'mm', min: -18, max: 22, step: 1, defaultValue: 0 },
+        { id: 'flareMm', label: 'Lateral Edge Seal Width', unit: 'mm', min: -25, max: 20, step: 1, defaultValue: 0 },
+      ],
+      proceduralElements: [
+        {
+          id: 'floor_fences',
+          label: 'Underfloor Vortex Fences',
+          enabled: true,
+          pitchDeg: 7,
+          scale: 1.0,
+          count: 3,
+          minCount: 2,
+          maxCount: 4,
+        },
+        {
+          id: 'floor_edge_scroll',
+          label: 'Lateral Floor-Edge Scroll Wing',
+          enabled: true,
+          pitchDeg: 10,
+          scale: 1.0,
+          count: 1,
+        },
+      ],
+    }),
 
-    sidepods: {
+    sidepods: makePart({
       id: 'sidepods',
-      name: 'Sidepods & Coke-Bottle Engine Cover',
+      name: 'Sidepod Inlet, Undercut & Coke-Bottle',
       shortName: 'Sidepods',
-      articleRef: 'FIA 2026 Art. 3.8 (RV-SIDEPOD / RV-EC)',
+      category: 'aero',
+      articleRef: 'FIA 2026 Art. 3.8 (RV-SIDEPOD)',
       description:
-        'Radiator intake, deep lower undercut, and tapered rear coke-bottle bodywork (max Y=715mm tapering to 225mm) feeding clean air to the beamless rear.',
+        'Radiator intake, deep lower undercut, and tapered rear coke-bottle bodywork feeding high-energy flow over the floor edge to the rear corner.',
       role: 'body_fairing',
       accentHex: '#f59e0b',
       centerlineLocked: false,
@@ -663,57 +1120,53 @@ export function createBaselineParts(): Record<PartId, AeroPartData> {
         makeFiaBox({
           id: 'rv_sidepod_front',
           label: 'RV-SIDEPOD Inlet & Shoulder',
-          xFFront: 880,
+          xFFront: 785,
           xFRear: 1850,
-          yMinFront: 145,
+          yMinFront: 35,
           yMaxFront: 725,
-          yMinRear: 145,
+          yMinRear: 35,
           yMaxRear: 755,
           zMinFront: 50,
-          zMaxFront: 655,
+          zMaxFront: 700,
           zMinRear: 50,
-          zMaxRear: 655,
+          zMaxRear: 700,
         }),
         makeFiaBox({
           id: 'rv_ec_cokebottle',
           label: 'RV-EC Tapered Coke-Bottle',
           xFFront: 1800,
-          xFRear: 3360,
-          yMinFront: 120,
+          xFRear: 3365,
+          yMinFront: 35,
           yMaxFront: 755,
-          yMinRear: 80,
-          yMaxRear: 265,
+          yMinRear: 35,
+          yMaxRear: 480,
           zMinFront: 50,
-          zMaxFront: 655,
+          zMaxFront: 700,
           zMinRear: 50,
-          zMaxRear: 585,
+          zMaxRear: 655,
         }),
       ],
       cols: 4,
       rows: 4,
       grid: fiaGrid([
-        // u=0: Inner shoulder along cockpit / engine cover
         [
           [980, 250, 560],
           [1700, 255, 555],
           [2500, 215, 500],
           [3250, 145, 430],
         ],
-        // u=1: Upper Coanda downwash ramp
         [
           [1020, 460, 535],
           [1720, 480, 495],
           [2520, 365, 385],
           [3250, 195, 285],
         ],
-        // u=2: Outer sidepod cheek (tapers sharply into coke-bottle!)
         [
           [1060, 665, 445],
           [1750, 705, 415],
           [2520, 495, 325],
           [3250, 225, 240],
         ],
-        // u=3: Lower undercut belly (pull inward in Y or upward in Z for deeper undercut!)
         [
           [1080, 565, 205],
           [1750, 585, 190],
@@ -721,12 +1174,245 @@ export function createBaselineParts(): Record<PartId, AeroPartData> {
           [3250, 205, 155],
         ],
       ]),
-    },
+      subZones: [
+        {
+          id: 'sp_inlet',
+          label: 'Radiator Inlet Lip',
+          description: 'Forward cooling intake opening & overbite lip (v=0)',
+          uIndices: [0, 1, 2, 3],
+          vIndices: [0],
+        },
+        {
+          id: 'sp_undercut',
+          label: 'Lower Undercut Belly',
+          description: 'Lower floor-skimming undercut channel (u=3)',
+          uIndices: [2, 3],
+          vIndices: [0, 1, 2],
+        },
+        {
+          id: 'sp_downwash_ramp',
+          label: 'Coanda Downwash Ramp',
+          description: 'Upper sloped deck guiding airflow to diffuser roof (u=1, v=1..3)',
+          uIndices: [0, 1],
+          vIndices: [1, 2, 3],
+        },
+        {
+          id: 'sp_cokebottle',
+          label: 'Coke-Bottle Waist',
+          description: 'Aft inward taper ahead of the rear tire (v=2..3)',
+          uIndices: [1, 2, 3],
+          vIndices: [2, 3],
+        },
+      ],
+      paramSliders: [
+        { id: 'flareMm', label: 'Sidepod Width / Undercut', unit: 'mm', min: -55, max: 35, step: 2, defaultValue: 0 },
+        { id: 'pitchDeg', label: 'Downwash Ramp Slope', unit: '°', min: -5, max: 5, step: 0.5, defaultValue: 0 },
+        { id: 'heightMm', label: 'Shoulder Deck Height', unit: 'mm', min: -35, max: 30, step: 1, defaultValue: 0 },
+      ],
+      proceduralElements: [
+        {
+          id: 'sp_cooling_louvers',
+          label: 'Cooling Exit Louver Cascade',
+          enabled: true,
+          pitchDeg: 14,
+          scale: 1.0,
+          count: 4,
+          minCount: 2,
+          maxCount: 6,
+        },
+      ],
+    }),
 
-    diffuser: {
+    engine_cover: makePart({
+      id: 'engine_cover',
+      name: 'Airbox Roll Hoop, Sharkfin & Tailcone',
+      shortName: 'Engine Cover',
+      category: 'body',
+      articleRef: 'FIA 2026 Art. 3.8.2 (RV-EC-SHARKFIN)',
+      description:
+        'Roll-hoop airbox intake, dorsal engine cover spine, yaw-stabilizing sharkfin, and central turbo-hybrid exhaust tailcone.',
+      role: 'chassis_body',
+      accentHex: '#eab308',
+      centerlineLocked: true,
+      thickness: 0.032,
+      legalityBoxes: [
+        makeFiaBox({
+          id: 'rv_ec_sharkfin_spine',
+          label: 'RV-EC Airbox & Sharkfin Spine',
+          xFFront: 1360,
+          xFRear: 4155,
+          yMinFront: 0,
+          yMaxFront: 705,
+          yMinRear: 0,
+          yMaxRear: 705,
+          zMinFront: 30,
+          zMaxFront: 1075,
+          zMinRear: 30,
+          zMaxRear: 1075,
+        }),
+      ],
+      cols: 3,
+      rows: 4,
+      grid: fiaGrid([
+        // u=0: Dorsal sharkfin ridge & airbox crown (Y=0)
+        [
+          [1520, 0, 965],
+          [2150, 0, 885],
+          [2820, 0, 775],
+          [3480, 0, 625],
+        ],
+        // u=1: Upper engine cover cannon shelf
+        [
+          [1560, 145, 760],
+          [2180, 155, 690],
+          [2840, 130, 595],
+          [3520, 95, 505],
+        ],
+        // u=2: Lower engine cover flank & exhaust tailpipe shroud
+        [
+          [1620, 240, 560],
+          [2220, 210, 480],
+          [2880, 155, 395],
+          [3620, 85, 340],
+        ],
+      ]),
+      subZones: [
+        {
+          id: 'ec_airbox',
+          label: 'Roll Hoop & Airbox',
+          description: 'Upper roll-hoop engine intake above driver helmet (v=0..1)',
+          uIndices: [0, 1],
+          vIndices: [0, 1],
+        },
+        {
+          id: 'ec_sharkfin',
+          label: 'Dorsal Sharkfin',
+          description: 'Centerline vertical stabilizer spine feeding rear wing (u=0)',
+          uIndices: [0],
+          vIndices: [1, 2, 3],
+        },
+        {
+          id: 'ec_cannon_exhaust',
+          label: 'Cooling Cannon & Exhaust',
+          description: 'Rear cooling exit cannon & central exhaust tailpipe (u=1..2, v=2..3)',
+          uIndices: [1, 2],
+          vIndices: [2, 3],
+        },
+      ],
+      paramSliders: [
+        { id: 'heightMm', label: 'Sharkfin Spine Height', unit: 'mm', min: -35, max: 35, step: 1, defaultValue: 0 },
+        { id: 'flareMm', label: 'Cooling Cannon Width', unit: 'mm', min: -30, max: 30, step: 1, defaultValue: 0 },
+        { id: 'pitchDeg', label: 'Spine Downwash Taper', unit: '°', min: -4, max: 4, step: 0.5, defaultValue: 0 },
+      ],
+      proceduralElements: [
+        {
+          id: 'ec_sharkfin_ext',
+          label: 'Dorsal Sharkfin Sail Extension',
+          enabled: true,
+          pitchDeg: 0,
+          scale: 1.0,
+          count: 1,
+        },
+      ],
+    }),
+
+    rear_suspension: makePart({
+      id: 'rear_suspension',
+      name: 'Rear Suspension & Brake Ducts',
+      shortName: 'Rear Susp',
+      category: 'suspension',
+      articleRef: 'FIA 2026 Art. 3.13 / 10 (RV-RBD)',
+      description:
+        'Rear carbon wishbone fairings, pullrod/trackrod shrouds, and rear brake drum upwash winglets conditioning inner rear tire wake.',
+      role: 'suspension',
+      accentHex: '#10b981',
+      centerlineLocked: false,
+      thickness: 0.018,
+      legalityBoxes: [
+        makeFiaBox({
+          id: 'rv_susp_rear_arms',
+          label: 'RV-SUSP-REAR Wishbone & RBD',
+          xFFront: 2945,
+          xFRear: 3720,
+          yMinFront: 70,
+          yMaxFront: 565,
+          yMinRear: 70,
+          yMaxRear: 565,
+          zMinFront: 30,
+          zMaxFront: 655,
+          zMinRear: 30,
+          zMaxRear: 655,
+        }),
+      ],
+      cols: 3,
+      rows: 3,
+      grid: fiaGrid([
+        // u=0: Gearbox inboard pick-ups
+        [
+          [3080, 135, 260],
+          [3320, 130, 320],
+          [3560, 120, 365],
+        ],
+        // u=1: Mid-span rear wishbones & driveshaft shroud
+        [
+          [3120, 320, 295],
+          [3360, 325, 345],
+          [3580, 320, 395],
+        ],
+        // u=2: Outboard rear brake duct & upwash winglet cascade
+        [
+          [3160, 495, 315],
+          [3390, 505, 355],
+          [3610, 495, 420],
+        ],
+      ]),
+      subZones: [
+        {
+          id: 'rsusp_inboard',
+          label: 'Gearbox Pick-Ups',
+          description: 'Inboard gearbox suspension mounts above diffuser (u=0)',
+          uIndices: [0],
+          vIndices: [0, 1, 2],
+        },
+        {
+          id: 'rsusp_wishbones',
+          label: 'Wishbones & Pullrod',
+          description: 'Swept carbon rear wishbone & driveshaft fairings (u=1)',
+          uIndices: [1],
+          vIndices: [0, 1, 2],
+        },
+        {
+          id: 'rsusp_brake_duct',
+          label: 'Rear Brake Duct Winglets',
+          description: 'Outboard rear brake drum & upwash cascade (u=2)',
+          uIndices: [2],
+          vIndices: [0, 1, 2],
+        },
+      ],
+      paramSliders: [
+        { id: 'pitchDeg', label: 'Wishbone Upwash Pitch', unit: '°', min: -5, max: 5, step: 0.5, defaultValue: 0 },
+        { id: 'heightMm', label: 'Anti-Squat Height Offset', unit: 'mm', min: -20, max: 20, step: 1, defaultValue: 0 },
+        { id: 'flareMm', label: 'Brake Duct Winglet Span', unit: 'mm', min: -18, max: 18, step: 1, defaultValue: 0 },
+      ],
+      proceduralElements: [
+        {
+          id: 'rsusp_upwash_winglets',
+          label: 'Rear Brake Duct Upwash Cascade',
+          enabled: true,
+          pitchDeg: 13,
+          scale: 1.0,
+          count: 3,
+          minCount: 1,
+          maxCount: 4,
+        },
+      ],
+    }),
+
+    diffuser: makePart({
       id: 'diffuser',
       name: 'Rear Diffuser & Boat-Tail',
       shortName: 'Diffuser',
+      category: 'aero',
       articleRef: 'FIA 2026 Art. 3.5.1 / 3.9 (RV-FLOOR-BODY / RV-TAIL)',
       description:
         'Narrower, lower-volume 2026 rear underbody diffuser and central crash boat-tail. Expands underfloor flow smoothly without a beam wing.',
@@ -738,16 +1424,16 @@ export function createBaselineParts(): Record<PartId, AeroPartData> {
         makeFiaBox({
           id: 'rv_diffuser_ramp',
           label: 'RV-FLOOR-BODY Diffuser Ramp',
-          xFFront: 2720,
-          xFRear: 3620,
+          xFFront: 2605,
+          xFRear: 3650,
           yMinFront: 0,
-          yMaxFront: 465,
+          yMaxFront: 505,
           yMinRear: 0,
-          yMaxRear: 398,
+          yMaxRear: 505,
           zMinFront: -10,
-          zMaxFront: 195,
-          zMinRear: 15,
-          zMaxRear: 315,
+          zMaxFront: 240,
+          zMinRear: -10,
+          zMaxRear: 360,
         }),
         makeFiaBox({
           id: 'rv_tail_structure',
@@ -755,9 +1441,9 @@ export function createBaselineParts(): Record<PartId, AeroPartData> {
           xFFront: 3250,
           xFRear: 4140,
           yMinFront: 0,
-          yMaxFront: 135,
+          yMaxFront: 165,
           yMinRear: 0,
-          yMaxRear: 135,
+          yMaxRear: 165,
           zMinFront: 0,
           zMaxFront: 475,
           zMinRear: 80,
@@ -767,28 +1453,24 @@ export function createBaselineParts(): Record<PartId, AeroPartData> {
       cols: 4,
       rows: 4,
       grid: fiaGrid([
-        // u=0: Central boat-tail keel (Y=0)
         [
           [2760, 0, 25],
           [3060, 0, 75],
           [3350, 0, 148],
           [3590, 0, 218],
         ],
-        // u=1: Inner diffuser expansion roof
         [
           [2760, 155, 68],
           [3060, 155, 125],
           [3350, 150, 195],
           [3580, 145, 258],
         ],
-        // u=2: Outer diffuser tunnel roof
         [
           [2760, 310, 65],
           [3060, 305, 120],
           [3350, 290, 188],
           [3580, 280, 248],
         ],
-        // u=3: Diffuser outer sidewall & corner strake
         [
           [2760, 425, 52],
           [3060, 410, 95],
@@ -796,12 +1478,61 @@ export function createBaselineParts(): Record<PartId, AeroPartData> {
           [3580, 380, 198],
         ],
       ]),
-    },
+      subZones: [
+        {
+          id: 'diff_kickline',
+          label: 'Throat Kickline',
+          description: 'Forward diffuser throat transition from step-plane (v=0..1)',
+          uIndices: [0, 1, 2, 3],
+          vIndices: [0, 1],
+        },
+        {
+          id: 'diff_boattail',
+          label: 'Center Boat-Tail Keel',
+          description: 'Central crash-structure keel ramp (u=0..1)',
+          uIndices: [0, 1],
+          vIndices: [1, 2, 3],
+        },
+        {
+          id: 'diff_outer_tunnels',
+          label: 'Expansion Roof & Sidewall',
+          description: 'Outer diffuser expansion tunnels & corner strakes (u=2..3, v=2..3)',
+          uIndices: [2, 3],
+          vIndices: [2, 3],
+        },
+      ],
+      paramSliders: [
+        { id: 'pitchDeg', label: 'Diffuser Expansion Angle', unit: '°', min: -5, max: 6, step: 0.5, defaultValue: 0 },
+        { id: 'camberMm', label: 'Tunnel Roof Arch', unit: 'mm', min: -25, max: 25, step: 1, defaultValue: 0 },
+        { id: 'flareMm', label: 'Sidewall Exit Width', unit: 'mm', min: -25, max: 25, step: 1, defaultValue: 0 },
+      ],
+      proceduralElements: [
+        {
+          id: 'diff_strakes',
+          label: 'Internal Expansion Strakes',
+          enabled: true,
+          pitchDeg: 4,
+          scale: 1.0,
+          count: 3,
+          minCount: 2,
+          maxCount: 4,
+        },
+        {
+          id: 'diff_gurney',
+          label: 'Upper Exit Lip Gurney',
+          enabled: false,
+          pitchDeg: 0,
+          scale: 1.0,
+          count: 1,
+        },
+      ],
+    }),
 
-    rear_wing: {
+    rear_wing: makePart({
       id: 'rear_wing',
       name: 'Rear Wing, Endplates & Pylon',
       shortName: 'Rear Wing',
+      category: 'aero',
       articleRef: 'FIA 2026 Art. 3.11 (RV-RW)',
       description:
         '3-element beamless 2026 rear wing (Y<=575mm, Z<=880mm) with active X-Mode/Z-Mode upper flaps (Y<=535mm) and curved lower endplates.',
@@ -813,8 +1544,8 @@ export function createBaselineParts(): Record<PartId, AeroPartData> {
         makeFiaBox({
           id: 'rv_rw_profiles',
           label: 'RV-RW-PROFILES Upper Cascade',
-          xFFront: 3580,
-          xFRear: 4090,
+          xFFront: 3500,
+          xFRear: 4155,
           yMinFront: 0,
           yMaxFront: 578,
           yMinRear: 0,
@@ -827,57 +1558,53 @@ export function createBaselineParts(): Record<PartId, AeroPartData> {
         makeFiaBox({
           id: 'rv_rwep_body',
           label: 'RV-RWEP-BODY Endplate Zone',
-          xFFront: 3560,
+          xFFront: 3500,
           xFRear: 4155,
-          yMinFront: 330,
+          yMinFront: 320,
           yMaxFront: 578,
-          yMinRear: 330,
+          yMinRear: 320,
           yMaxRear: 578,
-          zMinFront: 175,
+          zMinFront: 120,
           zMaxFront: 882,
-          zMinRear: 185,
+          zMinRear: 120,
           zMaxRear: 882,
         }),
         makeFiaBox({
           id: 'rv_rw_pylon',
           label: 'RV-RW-PYLON Swan-Neck',
           xFFront: 3400,
-          xFRear: 3840,
+          xFRear: 3985,
           yMinFront: 0,
-          yMaxFront: 95,
+          yMaxFront: 120,
           yMinRear: 0,
-          yMaxRear: 95,
+          yMaxRear: 120,
           zMinFront: 280,
-          zMaxFront: 785,
+          zMaxFront: 875,
           zMinRear: 320,
-          zMaxRear: 795,
+          zMaxRear: 875,
         }),
       ],
       cols: 4,
       rows: 4,
       grid: fiaGrid([
-        // u=0: Centerline mainplane -> active upper flap (Y=0)
         [
           [3645, 0, 735],
           [3785, 0, 760],
           [3920, 0, 810],
           [4035, 0, 858],
         ],
-        // u=1: Mid-span active cascade (Y=270)
         [
           [3655, 270, 740],
           [3795, 270, 765],
           [3925, 270, 815],
           [4040, 270, 862],
         ],
-        // u=2: Outboard wingtip & rolled shoulder (Y=530)
         [
           [3665, 530, 742],
           [3805, 530, 768],
           [3935, 530, 812],
           [4055, 530, 855],
         ],
-        // u=3: Lower endplate skirt (RV-RWEP-BODY)
         [
           [3640, 485, 420],
           [3800, 505, 440],
@@ -885,7 +1612,55 @@ export function createBaselineParts(): Record<PartId, AeroPartData> {
           [4115, 535, 510],
         ],
       ]),
-    },
+      subZones: [
+        {
+          id: 'rw_mainplane',
+          label: 'Lower Mainplane',
+          description: 'Leading fixed mainplane & central spoon (v=0..1)',
+          uIndices: [0, 1, 2],
+          vIndices: [0, 1],
+        },
+        {
+          id: 'rw_active_flaps',
+          label: 'Active Z/X-Mode Flaps',
+          description: 'Upper movable 2nd & 3rd flap elements (u=0..2, v=2..3)',
+          uIndices: [0, 1, 2],
+          vIndices: [2, 3],
+        },
+        {
+          id: 'rw_endplates',
+          label: 'Endplate Skirt',
+          description: 'Curved lower endplates & wingtip rollout (u=2..3)',
+          uIndices: [2, 3],
+          vIndices: [0, 1, 2, 3],
+        },
+      ],
+      paramSliders: [
+        { id: 'pitchDeg', label: 'Cascade AoA Incidence', unit: '°', min: -7, max: 6, step: 0.5, defaultValue: 0 },
+        { id: 'camberMm', label: 'Mainplane Spoon Depth', unit: 'mm', min: -28, max: 25, step: 1, defaultValue: 0 },
+        { id: 'flareMm', label: 'Endplate Toe / Flare', unit: 'mm', min: -22, max: 22, step: 1, defaultValue: 0 },
+      ],
+      proceduralElements: [
+        {
+          id: 'rw_gurney',
+          label: 'Trailing-Edge Gurney Flap',
+          enabled: false,
+          pitchDeg: 0,
+          scale: 1.0,
+          count: 1,
+        },
+        {
+          id: 'rw_endplate_vanes',
+          label: 'Lower Endplate Swirl Vanes',
+          enabled: true,
+          pitchDeg: 12,
+          scale: 1.0,
+          count: 3,
+          minCount: 2,
+          maxCount: 4,
+        },
+      ],
+    }),
   };
 }
 
@@ -903,7 +1678,6 @@ export function createPresetGrids(
   }
 
   if (preset === 'high_downforce') {
-    // Steeper front wing trailing flap + outboard endplate curl
     for (let u = 0; u < 4; u++) {
       result.front_wing[u][2].y += 0.018;
       result.front_wing[u][3].y += 0.032;
@@ -911,63 +1685,53 @@ export function createPresetGrids(
     result.front_wing[4][2].x += 0.018;
     result.front_wing[4][3].x += 0.020;
 
-    // Stronger 2026 floor board wake deflection
     for (let u = 1; u <= 2; u++) {
       result.floor_boards[u][2].x += 0.022;
       result.floor_boards[u][3].x += 0.028;
     }
 
-    // Tighter Venturi floor step-plane & sealed outer edge
     result.floor[1][2].y -= 0.010;
     result.floor[2][2].y -= 0.010;
     result.floor[3][2].y -= 0.010;
     result.floor[3][3].y -= 0.008;
 
-    // Deeper sidepod undercut + steeper Coanda downwash ramp
     result.sidepods[3][0].x -= 0.065;
     result.sidepods[3][1].x -= 0.075;
     result.sidepods[1][2].y -= 0.042;
     result.sidepods[1][3].y -= 0.038;
 
-    // Higher diffuser expansion ramp (near optimal limit)
     for (let u = 0; u < 3; u++) {
       result.diffuser[u][2].y += 0.018;
       result.diffuser[u][3].y += 0.032;
     }
 
-    // High-load Monaco rear wing cascade within Z=880mm ceiling
     for (let u = 0; u < 3; u++) {
       result.rear_wing[u][0].y -= 0.022;
       result.rear_wing[u][1].y -= 0.010;
       result.rear_wing[u][3].y += 0.018;
     }
   } else if (preset === 'low_drag') {
-    // Flatter low-drag front wing cascade
     for (let u = 0; u < 4; u++) {
       result.front_wing[u][2].y -= 0.018;
       result.front_wing[u][3].y -= 0.034;
     }
 
-    // Streamlined low-drag floor boards
     for (let u = 0; u < 3; u++) {
       result.floor_boards[u][2].x -= 0.018;
       result.floor_boards[u][3].x -= 0.024;
     }
 
-    // Tighter, slimmer coke-bottle sidepods
     for (let v = 0; v < 4; v++) {
       result.sidepods[2][v].x -= 0.045;
       result.sidepods[1][v].y -= 0.022;
     }
 
-    // Monza spoon / low-drag rear wing profile
     for (let u = 0; u < 3; u++) {
       result.rear_wing[u][2].y -= 0.022;
       result.rear_wing[u][3].y -= 0.042;
     }
   }
 
-  // Ensure every preset node is clamped cleanly within official FIA 2026 boxes
   for (const id of PART_ORDER) {
     const part = base[id];
     for (let u = 0; u < part.cols; u++) {

@@ -385,15 +385,7 @@ export function runCFDSimulation(
   let floorMinGroundClearanceM = 1.0;
 
   // Physical longitudinal marching sequence (Front -> Rear)
-  const sequence: PartId[] = [
-    'front_wing',
-    'nosecone',
-    'floor_boards',
-    'sidepods',
-    'floor',
-    'diffuser',
-    'rear_wing',
-  ];
+  const sequence: PartId[] = PART_ORDER;
 
   for (const partId of sequence) {
     const part = parts[partId];

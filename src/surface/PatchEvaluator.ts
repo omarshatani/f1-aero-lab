@@ -529,12 +529,18 @@ export function extractMeshPanelsAndLegality(
   const spanX = Math.max(0.01, maxX - minX);
   const spanZ = Math.max(0.01, maxZ - minZ);
 
-  // Target ~48 representative macro-panels per part for responsive CFD solve (< 10 ms)
-  const targetPanels = 48;
-  const stride = Math.max(1, Math.floor(totalTris / targetPanels));
+  // Filter +X half-car triangles and compute single-skin planform aerodynamic area
+  const plusXTris: Array<{
+    cx: number;
+    cy: number;
+    cz: number;
+    nx: number;
+    ny: number;
+    nz: number;
+  }> = [];
+  let totalPlanformArea = 0;
 
-  const panels: MacroAeroPanel[] = [];
-  for (let t = 0; t < totalTris; t += stride) {
+  for (let t = 0; t < totalTris; t++) {
     const i0 = indices ? indices[t * 3] : t * 3;
     const i1 = indices ? indices[t * 3 + 1] : t * 3 + 1;
     const i2 = indices ? indices[t * 3 + 2] : t * 3 + 2;
@@ -545,39 +551,57 @@ export function extractMeshPanelsAndLegality(
     const x2 = pos[o2], y2 = pos[o2 + 1], z2 = pos[o2 + 2];
 
     const cx = (x0 + x1 + x2) / 3;
+    if (cx < -0.001) continue;
+
     const cy = (y0 + y1 + y2) / 3;
     const cz = (z0 + z1 + z2) / 3;
-
-    // Only process +X half-car (CFDSolver handles bilateral symmetry)
-    if (cx < -0.001) continue;
 
     const d1x = x1 - x0, d1y = y1 - y0, d1z = z1 - z0;
     const d2x = x2 - x0, d2y = y2 - y0, d2z = z2 - z0;
     const crx = d1y * d2z - d1z * d2y;
     const cry = d1z * d2x - d1x * d2z;
     const crz = d1x * d2y - d1y * d2x;
-    const triArea = 0.5 * Math.hypot(crx, cry, crz);
-    if (triArea < 1e-6) continue;
+    const len = Math.hypot(crx, cry, crz);
+    if (len < 1e-6) continue;
 
-    const lenN = Math.hypot(crx, cry, crz) || 1;
-    const nx = crx / lenN;
-    const ny = cry / lenN;
-    const nz = crz / lenN;
+    // Single-skin planform area (half of closed 2-skin 3D shell)
+    const triArea = 0.5 * len * 0.5;
+    totalPlanformArea += triArea;
 
-    const su = Math.max(0, Math.min(1, (Math.abs(cx) - minX) / spanX));
-    const sv = Math.max(0, Math.min(1, (cz - minZ) / spanZ));
-
-    panels.push({
+    plusXTris.push({
       cx,
       cy,
       cz,
-      nx,
-      ny,
-      nz,
+      nx: crx / len,
+      ny: cry / len,
+      nz: crz / len,
+    });
+  }
+
+  // Target ~48 representative macro-panels per part for responsive CFD solve (< 10 ms)
+  const targetPanels = 48;
+  const numPanels = Math.min(plusXTris.length, Math.max(12, Math.min(targetPanels, plusXTris.length)));
+  const stride = Math.max(1, Math.floor(plusXTris.length / numPanels));
+  const actualPanels = Math.floor(plusXTris.length / stride);
+  const areaPerPanel = actualPanels > 0 ? totalPlanformArea / actualPanels : 0;
+
+  const panels: MacroAeroPanel[] = [];
+  for (let k = 0; k < actualPanels; k++) {
+    const tri = plusXTris[k * stride];
+    const su = Math.max(0, Math.min(1, (Math.abs(tri.cx) - minX) / spanX));
+    const sv = Math.max(0, Math.min(1, (tri.cz - minZ) / spanZ));
+
+    panels.push({
+      cx: tri.cx,
+      cy: tri.cy,
+      cz: tri.cz,
+      nx: tri.nx,
+      ny: tri.ny,
+      nz: tri.nz,
       tx: 0,
       ty: 0,
       tz: 1,
-      area: triArea * stride,
+      area: areaPerPanel,
       su,
       sv,
     });

@@ -438,9 +438,13 @@ export class SceneManager {
     > = {
       front_wing: { cam: [1.55, 0.72, -3.65], look: [0.35, 0.20, -2.50] },
       nosecone: { cam: [1.45, 0.85, -3.15], look: [0.05, 0.34, -2.15] },
+      front_suspension: { cam: [1.65, 0.72, -2.45], look: [0.42, 0.35, -1.65] },
+      monocoque: { cam: [1.75, 1.05, -1.55], look: [0.15, 0.55, -0.55] },
       floor_boards: { cam: [1.65, 0.58, -1.45], look: [0.68, 0.22, -0.62] },
       floor: { cam: [1.85, -0.48, -0.75], look: [0.25, 0.08, 0.05] },
       sidepods: { cam: [2.05, 0.88, -1.25], look: [0.42, 0.36, 0.25] },
+      engine_cover: { cam: [2.15, 1.25, 0.45], look: [0.12, 0.68, 0.65] },
+      rear_suspension: { cam: [1.70, 0.72, 2.55], look: [0.35, 0.36, 1.65] },
       diffuser: { cam: [1.48, 0.44, 3.15], look: [0.20, 0.16, 1.65] },
       rear_wing: { cam: [1.50, 1.18, 3.35], look: [0.20, 0.80, 2.20] },
     };

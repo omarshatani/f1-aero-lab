@@ -25,18 +25,76 @@ export type ActiveAeroMode = 'z_mode' | 'x_mode';
 export type PartId =
   | 'front_wing'
   | 'nosecone'
+  | 'front_suspension'
+  | 'monocoque'
   | 'floor_boards'
   | 'floor'
   | 'sidepods'
+  | 'engine_cover'
+  | 'rear_suspension'
   | 'diffuser'
   | 'rear_wing';
+
+export type PartCategory = 'aero' | 'body' | 'suspension';
 
 export type SurfaceRole =
   | 'wing'
   | 'wake_board'
   | 'ground_effect'
   | 'body_fairing'
-  | 'diffuser';
+  | 'diffuser'
+  | 'chassis_body'
+  | 'suspension';
+
+/**
+ * Named functional Sub-Zone within an aerodynamic or chassis component.
+ */
+export interface PartSubZone {
+  id: string;
+  label: string;
+  description: string;
+  uIndices: number[];
+  vIndices: number[];
+}
+
+/**
+ * Parametric engineering slider definition driving smooth macro FFD shaping on a part.
+ */
+export interface PartParamSlider {
+  id: string;
+  label: string;
+  unit: string;
+  min: number;
+  max: number;
+  step: number;
+  defaultValue: number;
+}
+
+/**
+ * Configurable 3D procedural aerodynamic appendage welded into a part's FFD & CFD pipeline.
+ */
+export interface ProceduralElementConfig {
+  id: string;
+  label: string;
+  enabled: boolean;
+  pitchDeg: number;
+  scale: number;
+  count: number;
+  minCount?: number;
+  maxCount?: number;
+}
+
+/**
+ * Parametric 4-Wheel & Axle Stance settings coupled into 3D wheel pivots and CFD tire wake.
+ */
+export interface WheelStanceSettings {
+  frontTrackOffsetMm: number;
+  rearTrackOffsetMm: number;
+  frontCamberDeg: number;
+  rearCamberDeg: number;
+  frontToeDeg: number;
+  rimCoverDishMm: number;
+}
 
 /**
  * Official 2026 FIA Appendix 1 Reference Volume sub-frustum on the +X half-car
@@ -72,6 +130,7 @@ export interface AeroPartData {
   id: PartId;
   name: string;
   shortName: string;
+  category: PartCategory;
   articleRef: string;
   description: string;
   role: SurfaceRole;
@@ -88,6 +147,14 @@ export interface AeroPartData {
   rows: number;
   /** 3D FFD control lattice grid[u][v] in meters on the +X half-car */
   grid: Vec3[][];
+  /** Selectable functional Sub-Zones within this part */
+  subZones: PartSubZone[];
+  /** Engineering macro sliders for this part */
+  paramSliders: PartParamSlider[];
+  /** Current values of engineering macro sliders */
+  paramValues: Record<string, number>;
+  /** Configurable 3D procedural aero elements attached to this part */
+  proceduralElements: ProceduralElementConfig[];
 }
 
 /**
@@ -115,7 +182,12 @@ export interface MacroAeroPanel {
 
 export type AppMode = 'sculpt' | 'cfd';
 
-export type SculptSelectMode = 'node' | 'span_rib' | 'chord_edge' | 'whole_part';
+export type SculptSelectMode =
+  | 'node'
+  | 'span_rib'
+  | 'chord_edge'
+  | 'sub_zone'
+  | 'whole_part';
 
 export type TransformAxisMode = 'translate' | 'bend_twist';
 
@@ -139,6 +211,7 @@ export interface TunnelSettings {
   rearRideHeightMm: number;
   yawAngleDeg: number;
   activeAeroMode: ActiveAeroMode;
+  wheelStance?: WheelStanceSettings;
 }
 
 export type StreamlineColorMode = 'velocity' | 'pressure' | 'turbulence';
@@ -221,7 +294,10 @@ export interface CarDesignSnapshot {
   name: string;
   createdAt: number;
   carModelId?: CarModelId;
-  parts: Record<PartId, Vec3[][]>;
+  parts: Partial<Record<PartId, Vec3[][]>>;
+  paramValues?: Partial<Record<PartId, Record<string, number>>>;
+  proceduralElements?: Partial<Record<PartId, ProceduralElementConfig[]>>;
+  wheelStance?: WheelStanceSettings;
   summary?: {
     cl: number;
     cd: number;

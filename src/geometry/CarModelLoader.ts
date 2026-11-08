@@ -281,9 +281,13 @@ export class CarModelLoader {
     const allBuckets: Record<BucketId, RawBucketAccumulator> = {
       front_wing: { positions: [], colors: [], hasColors: false },
       nosecone: { positions: [], colors: [], hasColors: false },
+      front_suspension: { positions: [], colors: [], hasColors: false },
+      monocoque: { positions: [], colors: [], hasColors: false },
       floor_boards: { positions: [], colors: [], hasColors: false },
       floor: { positions: [], colors: [], hasColors: false },
       sidepods: { positions: [], colors: [], hasColors: false },
+      engine_cover: { positions: [], colors: [], hasColors: false },
+      rear_suspension: { positions: [], colors: [], hasColors: false },
       diffuser: { positions: [], colors: [], hasColors: false },
       rear_wing: { positions: [], colors: [], hasColors: false },
       static_chassis: { positions: [], colors: [], hasColors: true },

@@ -164,7 +164,7 @@ export class HudController {
             <div class="control-group" id="param-sliders-box"></div>
           </div>
 
-          <div>
+          <div style="display:none;">
             <div class="section-title">
               <span>4. Procedural Aero Appendages</span>
             </div>
@@ -173,7 +173,7 @@ export class HudController {
 
           <div id="wheel-stance-section">
             <div class="section-title">
-              <span>5. 4-Wheel & Axle Stance</span>
+              <span>4. 4-Wheel & Axle Stance</span>
               <div style="display:flex;gap:4px;">
                 <button class="btn btn-sm" id="btn-reset-stance">Reset Stance</button>
                 <button class="btn btn-sm" id="btn-toggle-stance">Expand</button>
@@ -184,7 +184,7 @@ export class HudController {
 
           <div id="fixtures-section">
             <div class="section-title">
-              <span>6. Vehicle Fixtures & Aero Hardware</span>
+              <span>5. Vehicle Fixtures & Aero Hardware</span>
               <div style="display:flex;gap:4px;">
                 <button class="btn btn-sm" id="btn-fixtures-all">All On</button>
                 <button class="btn btn-sm" id="btn-toggle-fixtures">Collapse</button>
@@ -195,7 +195,7 @@ export class HudController {
 
           <div>
             <div class="section-title">
-              <span>7. 3D Dense Control Lattice & Gizmo</span>
+              <span>6. 3D Dense Control Lattice & Gizmo</span>
             </div>
             <div class="control-group">
               <div style="font-size:11px;color:var(--text-muted);margin-top:2px;">Selection Target</div>
@@ -227,7 +227,7 @@ export class HudController {
           </div>
 
           <div>
-            <div class="section-title"><span>8. FIA 2026 Appendix 1 Box & View</span></div>
+            <div class="section-title"><span>7. FIA 2026 Appendix 1 Box & View</span></div>
             <div class="control-group">
               <label class="check-row">
                 <input type="checkbox" id="chk-clamp-fia" />

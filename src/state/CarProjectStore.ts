@@ -7,14 +7,16 @@ import {
   cloneProceduralElements,
   createBaselineParts,
   createCageV2,
-  createPresetGrids,
+  createPresetCagesV2,
   DEFAULT_FIXTURES,
   DEFAULT_WHEEL_STANCE,
   FITTED_CAGES_V2,
   interpolateMacroToDetail,
   PART_ORDER,
+  signedMarginInUnion,
   syncSharedSeamNodes,
 } from '../regulations/fia2026';
+import { FBX_CAR_PARTS } from '../surface/fbxCarData';
 import {
   AeroPartData,
   AppMode,
@@ -653,6 +655,88 @@ export class CarProjectStore {
         syncSharedSeamNodes(partId, u, v, clamped, allCages, 'detail');
       }
     }
+
+    // Ensure every skinned +X mesh vertex of the part lies inside part.legalityBoxes
+    const fbxTpl = FBX_CAR_PARTS[partId];
+    if (fbxTpl && part.cage.detail.length === fbxTpl.baseDetail.length) {
+      const cols = part.cage.detailCols;
+      const rows = part.cage.detailRows;
+      const pos = fbxTpl.positions;
+      const uvs = fbxTpl.uvs;
+      const vCount = pos.length / 3;
+
+      for (let pass = 0; pass < 10; pass++) {
+        const badNodes = new Set<string>();
+        for (let i = 0; i < vCount; i++) {
+          const su = uvs[i * 2];
+          const sv = uvs[i * 2 + 1];
+          const fu = su * (cols - 1);
+          const fv = sv * (rows - 1);
+          const u0 = Math.max(0, Math.min(cols - 2, Math.floor(fu)));
+          const v0 = Math.max(0, Math.min(rows - 2, Math.floor(fv)));
+          const u1 = Math.min(cols - 1, u0 + 1);
+          const v1 = Math.min(rows - 1, v0 + 1);
+          const tu = Math.max(0, Math.min(1, fu - u0));
+          const tv = Math.max(0, Math.min(1, fv - v0));
+          const hu = tu * tu * (3 - 2 * tu);
+          const hv = tv * tv * (3 - 2 * tv);
+
+          const w00 = (1 - hu) * (1 - hv);
+          const w10 = hu * (1 - hv);
+          const w01 = (1 - hu) * hv;
+          const w11 = hu * hv;
+
+          const corners: [number, number, number][] = [
+            [u0, v0, w00],
+            [u1, v0, w10],
+            [u0, v1, w01],
+            [u1, v1, w11],
+          ];
+          let dx = 0;
+          let dy = 0;
+          let dz = 0;
+          for (const [cu, cv, w] of corners) {
+            const cur = part.cage.detail[cu][cv];
+            const base = fbxTpl.baseDetail[cu][cv];
+            dx += w * (cur.x - base.x);
+            dy += w * (cur.y - base.y);
+            dz += w * (cur.z - base.z);
+          }
+
+          const bx = pos[i * 3];
+          const px = part.centerlineLocked && bx <= 1e-4 ? 0 : Math.max(0, bx + dx);
+          const py = pos[i * 3 + 1] + dy;
+          const pz = pos[i * 3 + 2] + dz;
+          if (signedMarginInUnion({ x: px, y: py, z: pz }, part.legalityBoxes) < 0) {
+            for (const [cu, cv, w] of corners) {
+              if (w > 0.01) {
+                badNodes.add(`${cu},${cv}`);
+              }
+            }
+          }
+        }
+
+        if (badNodes.size === 0) break;
+        const shrink = pass === 9 ? 0 : 0.5;
+        for (const key of badNodes) {
+          const [cuStr, cvStr] = key.split(',');
+          const cu = Number(cuStr);
+          const cv = Number(cvStr);
+          const cur = part.cage.detail[cu][cv];
+          const base = fbxTpl.baseDetail[cu][cv];
+          const pulled = {
+            x: base.x + (cur.x - base.x) * shrink,
+            y: base.y + (cur.y - base.y) * shrink,
+            z: base.z + (cur.z - base.z) * shrink,
+          };
+          const lockCenter = part.centerlineLocked && cu === 0;
+          const clamped = clampPointToLegalityBoxes(pulled, part.legalityBoxes, lockCenter);
+          part.cage.detail[cu][cv] = clamped;
+          syncSharedSeamNodes(partId, cu, cv, clamped, allCages, 'detail');
+        }
+      }
+    }
+
     for (const id of PART_ORDER) {
       this.syncMacroAndOffsetsFromDetail(id);
     }
@@ -683,15 +767,15 @@ export class CarProjectStore {
 
   public applyConceptPreset(preset: 'baseline' | 'high_downforce' | 'low_drag'): void {
     this.pushUndoCheckpoint();
-    const grids = createPresetGrids(preset);
+    const presetCages = createPresetCagesV2(preset);
     const defaults = createBaselineParts();
     for (const id of PART_ORDER) {
       if (preset === 'baseline') {
         this.parts[id].enabled = true;
       }
-      this.parts[id].grid = grids[id];
-      this.parts[id].cage = createCageV2(grids[id], this.parts[id].centerlineLocked);
-      this.baseGrids[id] = cloneGrid(grids[id]);
+      this.parts[id].cage = cloneCageV2(presetCages[id]);
+      this.parts[id].grid = this.parts[id].cage!.macro;
+      this.baseGrids[id] = cloneGrid(this.parts[id].grid);
       this.parts[id].paramValues = { ...defaults[id].paramValues };
       if (preset === 'baseline') {
         this.parts[id].proceduralElements = cloneProceduralElements(

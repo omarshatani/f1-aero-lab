@@ -1,4 +1,6 @@
 import * as THREE from 'three';
+import { getRefCamberDetail } from '../regulations/fia2026';
+import { FBX_CAR_PARTS } from '../surface/fbxCarData';
 import { AeroPartData, PartSurfaceCpMap, SurfaceVizMode, Vec3 } from '../types/aero';
 
 export interface SampledSurfaceGrid {
@@ -74,7 +76,29 @@ export function sampleSplineSurface(
   uSteps = 22,
   vSteps = 18
 ): SampledSurfaceGrid {
-  const grid = part.cage?.detail ?? part.grid;
+  const rawGrid = part.cage?.detail ?? part.grid;
+  const fbxBase = FBX_CAR_PARTS[part.id]?.baseDetail;
+  const refDetail = getRefCamberDetail(part.id);
+  const grid: Vec3[][] =
+    fbxBase &&
+    refDetail &&
+    rawGrid.length === fbxBase.length &&
+    rawGrid.length === refDetail.length &&
+    rawGrid[0]?.length === fbxBase[0]?.length &&
+    rawGrid[0]?.length === refDetail[0]?.length
+      ? rawGrid.map((col, u) =>
+          col.map((pt, v) => {
+            const base = fbxBase[u][v];
+            const ref = refDetail[u][v];
+            const nx = ref.x + (pt.x - base.x);
+            return {
+              x: part.centerlineLocked && u === 0 ? 0 : Math.max(0, nx),
+              y: ref.y + (pt.y - base.y),
+              z: ref.z + (pt.z - base.z),
+            };
+          })
+        )
+      : rawGrid;
   const cols = grid.length;
 
   // First evaluate v-curves along each control column u

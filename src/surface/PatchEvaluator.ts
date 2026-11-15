@@ -1,5 +1,4 @@
 import * as THREE from 'three';
-import { buildProceduralElementsForPart } from '../geometry/proceduralElements';
 import { cpToRgb, separationToRgb } from '../geometry/splineSurface';
 import {
   ActiveAeroMode,
@@ -55,7 +54,7 @@ function fillVertexColors(
   const count = positions.length / 3;
   if (vizMode === 'carbon' || !cpMap) {
     const [rAcc, gAcc, bAcc] = parseAccentRgb(part.accentHex);
-    const tint = isSelectedPart ? 0.28 : 0.14;
+    const tint = isSelectedPart ? 0.16 : 0.0;
     const trimTint = Math.min(0.45, tint * 1.45);
 
     const bodyR = 0.13 + rAcc * tint;
@@ -157,45 +156,20 @@ export function evaluatePartSurface(
   aeroMode: ActiveAeroMode = 'z_mode'
 ): EvaluatedPartSurface {
   const body = buildPartBodyGeometry(part, lod, aeroMode);
-  const proc = buildProceduralElementsForPart(part);
+  const colors = new Float32Array(body.positions.length);
 
-  const totalVerts = body.vertexCount + proc.vertexCount;
-  const totalIndices = body.indices.length + proc.indices.length;
-
-  const positions = new Float32Array(totalVerts * 3);
-  const normals = new Float32Array(totalVerts * 3);
-  const colors = new Float32Array(totalVerts * 3);
-  const shades = new Uint8Array(totalVerts);
-  const indices = new Uint32Array(totalIndices);
-
-  positions.set(body.positions, 0);
-  normals.set(body.normals, 0);
-  shades.set(body.shades, 0);
-  indices.set(body.indices, 0);
-
-  if (proc.vertexCount > 0) {
-    const posOffset = body.vertexCount * 3;
-    positions.set(proc.positions, posOffset);
-    normals.set(proc.normals, posOffset);
-    shades.fill(SHADE_TRIM, body.vertexCount);
-    const idxOffset = body.indices.length;
-    for (let i = 0; i < proc.indices.length; i++) {
-      indices[idxOffset + i] = proc.indices[i] + body.vertexCount;
-    }
-  }
-
-  fillVertexColors(positions, normals, colors, part, vizMode, cpMap, shades, false);
+  fillVertexColors(body.positions, body.normals, colors, part, vizMode, cpMap, body.shades, false);
 
   return {
     partId: part.id,
     lod,
-    positions,
-    normals,
+    positions: body.positions,
+    normals: body.normals,
     colors,
-    shades,
-    indices,
-    vertexCount: totalVerts,
-    triangleCount: Math.floor(totalIndices / 3),
+    shades: body.shades,
+    indices: body.indices,
+    vertexCount: body.vertexCount,
+    triangleCount: body.triangleCount,
   };
 }
 

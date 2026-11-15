@@ -14,6 +14,7 @@ import {
   Vec3,
   WheelStanceSettings,
 } from '../types/aero';
+import { FBX_CAR_PARTS } from '../surface/fbxCarData';
 
 export const PART_ORDER: PartId[] = [
   'front_wing',
@@ -623,6 +624,76 @@ export function cloneCageV2(cage: CageV2): CageV2 {
 }
 
 /**
+ * Builds a V2 control cage directly from a dense surface-wrapped detail lattice
+ * (such as 222.fbx part control points), deriving the sparse macro handles and
+ * exact detailOffsets so detail sculpting preserves full skin fidelity.
+ */
+export function createCageV2FromDetail(
+  detailGrid: Vec3[][],
+  centerlineLocked = false
+): CageV2 {
+  const detailCols = detailGrid.length;
+  const detailRows = detailGrid[0]?.length ?? 0;
+  const macroCols = Math.max(2, Math.floor((detailCols - 1) / 3) + 1);
+  const macroRows = Math.max(2, Math.floor((detailRows - 1) / 3) + 1);
+
+  const detail = cloneGrid(detailGrid);
+  if (centerlineLocked && detail[0]) {
+    for (let v = 0; v < detailRows; v++) {
+      detail[0][v] = { x: 0, y: detail[0][v].y, z: detail[0][v].z };
+    }
+  }
+
+  const macro: Vec3[][] = [];
+  for (let mu = 0; mu < macroCols; mu++) {
+    const du = Math.min(detailCols - 1, mu * 3);
+    const col: Vec3[] = [];
+    for (let mv = 0; mv < macroRows; mv++) {
+      const dv = Math.min(detailRows - 1, mv * 3);
+      const pt = detail[du][dv];
+      col.push({
+        x: centerlineLocked && mu === 0 ? 0 : Math.max(0, pt.x),
+        y: pt.y,
+        z: pt.z,
+      });
+    }
+    macro.push(col);
+  }
+
+  const macroInterp = interpolateMacroToDetail(
+    macro,
+    detailCols,
+    detailRows,
+    undefined,
+    centerlineLocked
+  );
+  const detailOffsets: Vec3[][] = [];
+  for (let u = 0; u < detailCols; u++) {
+    const col: Vec3[] = [];
+    for (let v = 0; v < detailRows; v++) {
+      const d = detail[u][v];
+      const m = macroInterp[u][v];
+      col.push({
+        x: d.x - m.x,
+        y: d.y - m.y,
+        z: d.z - m.z,
+      });
+    }
+    detailOffsets.push(col);
+  }
+
+  return {
+    macroCols,
+    macroRows,
+    detailCols,
+    detailRows,
+    macro,
+    detail,
+    detailOffsets,
+  };
+}
+
+/**
  * Create a new CageV2 from a macro grid with default detail density ((cols-1)*3+1 x (rows-1)*3+1).
  */
 export function createCageV2(macro: Vec3[][], lockCenterline = false): CageV2 {
@@ -904,14 +975,28 @@ export function applyParametricOffsetsToGrid(
  * Create the official FIA 2026 baseline aerodynamic, chassis, and suspension parts (11 components),
  * Reference Volumes (Appendix 1), Sub-Zones, Parametric Sliders, and Procedural Aero Elements.
  */
+const REF_CAMBER_DETAIL_MAP = {} as Partial<Record<PartId, Vec3[][]>>;
+
+export function getRefCamberDetail(partId: PartId): Vec3[][] | undefined {
+  return REF_CAMBER_DETAIL_MAP[partId];
+}
+
 export function createBaselineParts(): Record<PartId, AeroPartData> {
   const makePart = (spec: Omit<AeroPartData, 'paramValues'>): AeroPartData => {
-    const cage = createCageV2(spec.grid, spec.centerlineLocked);
+    if (!REF_CAMBER_DETAIL_MAP[spec.id]) {
+      REF_CAMBER_DETAIL_MAP[spec.id] = createCageV2(spec.grid, spec.centerlineLocked).detail;
+    }
+    const fbxTemplate = FBX_CAR_PARTS[spec.id];
+    const cage = fbxTemplate?.baseDetail
+      ? createCageV2FromDetail(fbxTemplate.baseDetail, spec.centerlineLocked)
+      : createCageV2(spec.grid, spec.centerlineLocked);
     return {
       ...spec,
       enabled: spec.enabled ?? true,
       cage,
       grid: cage.macro,
+      cols: cage.macroCols,
+      rows: cage.macroRows,
       paramValues: initDefaultParamValues(spec.paramSliders),
     };
   };
@@ -934,39 +1019,39 @@ export function createBaselineParts(): Record<PartId, AeroPartData> {
           id: 'rv_fw_profiles_inboard',
           label: 'RV-FW-PROFILES Inboard',
           xFFront: -1250,
-          xFRear: -500,
+          xFRear: -490,
           yMinFront: 0,
           yMaxFront: 360,
           yMinRear: 0,
           yMaxRear: 450,
           zMinFront: 55,
-          zMaxFront: 255,
-          zMinRear: 85,
-          zMaxRear: 290,
+          zMaxFront: 280,
+          zMinRear: 75,
+          zMaxRear: 300,
         }),
         makeFiaBox({
           id: 'rv_fw_profiles_outboard',
           label: 'RV-FW-PROFILES Swept Span',
-          xFFront: -1150,
+          xFFront: -1190,
           xFRear: -355,
           yMinFront: 320,
           yMaxFront: 685,
           yMinRear: 320,
           yMaxRear: 685,
           zMinFront: 58,
-          zMaxFront: 285,
+          zMaxFront: 295,
           zMinRear: 68,
           zMaxRear: 320,
         }),
         makeFiaBox({
           id: 'rv_fwep_body_and_ofp',
           label: 'RV-FWEP Endplate & Footplate',
-          xFFront: -1120,
+          xFFront: -1190,
           xFRear: -295,
-          yMinFront: 590,
-          yMaxFront: 904,
-          yMinRear: 590,
-          yMaxRear: 904,
+          yMinFront: 580,
+          yMaxFront: 955,
+          yMinRear: 580,
+          yMaxRear: 955,
           zMinFront: 48,
           zMaxFront: 392,
           zMinRear: 48,
@@ -1036,26 +1121,7 @@ export function createBaselineParts(): Record<PartId, AeroPartData> {
         { id: 'camberMm', label: 'Spoon & Flap Camber', unit: 'mm', min: -120, max: 120, step: 2, defaultValue: 0 },
         { id: 'flareMm', label: 'Endplate Outwash Flare', unit: 'mm', min: -120, max: 120, step: 2, defaultValue: 0 },
       ],
-      proceduralElements: [
-        {
-          id: 'fw_diveplane',
-          label: 'Endplate Outwash Diveplane',
-          enabled: true,
-          pitchDeg: 11,
-          scale: 1.0,
-          count: 1,
-          minCount: 1,
-          maxCount: 2,
-        },
-        {
-          id: 'fw_gurney',
-          label: 'Upper Flap Gurney Lip',
-          enabled: false,
-          pitchDeg: 0,
-          scale: 1.0,
-          count: 1,
-        },
-      ],
+      proceduralElements: [],
     }),
 
     nosecone: makePart({
@@ -1074,16 +1140,16 @@ export function createBaselineParts(): Record<PartId, AeroPartData> {
         makeFiaBox({
           id: 'rv_nose_main',
           label: 'RV-NOSE Tapered Fairing',
-          xFFront: -1300,
-          xFRear: 115,
+          xFFront: -1200,
+          xFRear: 535,
           yMinFront: 0,
-          yMaxFront: 220,
+          yMaxFront: 280,
           yMinRear: 0,
           yMaxRear: 390,
-          zMinFront: 115,
-          zMaxFront: 350,
-          zMinRear: 175,
-          zMaxRear: 645,
+          zMinFront: 25,
+          zMaxFront: 650,
+          zMinRear: 25,
+          zMaxRear: 845,
         }),
         makeFiaBox({
           id: 'rv_fw_pylon',
@@ -1094,9 +1160,9 @@ export function createBaselineParts(): Record<PartId, AeroPartData> {
           yMaxFront: 185,
           yMinRear: 0,
           yMaxRear: 220,
-          zMinFront: 60,
+          zMinFront: 25,
           zMaxFront: 260,
-          zMinRear: 85,
+          zMinRear: 25,
           zMaxRear: 320,
         }),
       ],
@@ -1150,16 +1216,7 @@ export function createBaselineParts(): Record<PartId, AeroPartData> {
         { id: 'heightMm', label: 'Under-Nose Clearance', unit: 'mm', min: -120, max: 120, step: 2, defaultValue: 0 },
         { id: 'flareMm', label: 'Cape Cheek Width', unit: 'mm', min: -120, max: 120, step: 2, defaultValue: 0 },
       ],
-      proceduralElements: [
-        {
-          id: 'nose_cape_vanes',
-          label: 'Under-Nose Turning Vanes',
-          enabled: false,
-          pitchDeg: 8,
-          scale: 1.0,
-          count: 1,
-        },
-      ],
+      proceduralElements: [],
     }),
 
     front_suspension: makePart({
@@ -1178,16 +1235,16 @@ export function createBaselineParts(): Record<PartId, AeroPartData> {
         makeFiaBox({
           id: 'rv_susp_front_arms',
           label: 'RV-SUSP-FRONT Wishbone Envelope',
-          xFFront: -330,
-          xFRear: 475,
-          yMinFront: 140,
-          yMaxFront: 620,
-          yMinRear: 140,
-          yMaxRear: 620,
-          zMinFront: 80,
-          zMaxFront: 550,
-          zMinRear: 80,
-          zMaxRear: 550,
+          xFFront: -435,
+          xFRear: 600,
+          yMinFront: 80,
+          yMaxFront: 680,
+          yMinRear: 80,
+          yMaxRear: 680,
+          zMinFront: 50,
+          zMaxFront: 580,
+          zMinRear: 50,
+          zMaxRear: 580,
         }),
       ],
       cols: 3,
@@ -1240,18 +1297,7 @@ export function createBaselineParts(): Record<PartId, AeroPartData> {
         { id: 'heightMm', label: 'Roll-Center Height Offset', unit: 'mm', min: -120, max: 120, step: 2, defaultValue: 0 },
         { id: 'flareMm', label: 'Brake Scoop Width', unit: 'mm', min: -120, max: 120, step: 2, defaultValue: 0 },
       ],
-      proceduralElements: [
-        {
-          id: 'fsusp_duct_winglet',
-          label: 'Brake Duct Outwash Winglet',
-          enabled: true,
-          pitchDeg: 9,
-          scale: 1.0,
-          count: 2,
-          minCount: 1,
-          maxCount: 3,
-        },
-      ],
+      proceduralElements: [],
     }),
 
     monocoque: makePart({
@@ -1270,16 +1316,16 @@ export function createBaselineParts(): Record<PartId, AeroPartData> {
         makeFiaBox({
           id: 'rv_chassis_monocoque',
           label: 'RV-CHASSIS Survival Cell & Halo',
-          xFFront: -420,
-          xFRear: 1680,
+          xFFront: 235,
+          xFRear: 1875,
           yMinFront: 0,
           yMaxFront: 895,
           yMinRear: 0,
           yMaxRear: 895,
-          zMinFront: 25,
-          zMaxFront: 870,
-          zMinRear: 25,
-          zMaxRear: 870,
+          zMinFront: 20,
+          zMaxFront: 730,
+          zMinRear: 20,
+          zMaxRear: 1045,
         }),
       ],
       cols: 3,
@@ -1335,16 +1381,7 @@ export function createBaselineParts(): Record<PartId, AeroPartData> {
         { id: 'camberMm', label: 'Cockpit Coaming Arch', unit: 'mm', min: -100, max: 100, step: 2, defaultValue: 0 },
         { id: 'flareMm', label: 'Mirror Stalk Span', unit: 'mm', min: -120, max: 120, step: 2, defaultValue: 0 },
       ],
-      proceduralElements: [
-        {
-          id: 'mono_halo_boomerang',
-          label: 'Halo Boomerang Conditioning Vane',
-          enabled: false,
-          pitchDeg: 6,
-          scale: 1.0,
-          count: 1,
-        },
-      ],
+      proceduralElements: [],
     }),
 
     floor_boards: makePart({
@@ -1363,11 +1400,11 @@ export function createBaselineParts(): Record<PartId, AeroPartData> {
         makeFiaBox({
           id: 'rv_floor_board',
           label: 'RV-FLOOR-BOARD Slat Zone',
-          xFFront: 605,
+          xFFront: 575,
           xFRear: 1750,
-          yMinFront: 560,
+          yMinFront: 175,
           yMaxFront: 904,
-          yMinRear: 560,
+          yMinRear: 175,
           yMaxRear: 904,
           zMinFront: 30,
           zMaxFront: 455,
@@ -1377,11 +1414,11 @@ export function createBaselineParts(): Record<PartId, AeroPartData> {
         makeFiaBox({
           id: 'rv_floor_foot',
           label: 'RV-FLOOR-FOOT Footplate',
-          xFFront: 605,
+          xFFront: 575,
           xFRear: 1750,
-          yMinFront: 560,
+          yMinFront: 175,
           yMaxFront: 904,
-          yMinRear: 560,
+          yMinRear: 175,
           yMaxRear: 904,
           zMinFront: -2,
           zMaxFront: 148,
@@ -1439,18 +1476,7 @@ export function createBaselineParts(): Record<PartId, AeroPartData> {
         { id: 'pitchDeg', label: 'Slat Vertical Rake', unit: '°', min: -25, max: 25, step: 0.5, defaultValue: 0 },
         { id: 'camberMm', label: 'Cascade Curvature', unit: 'mm', min: -120, max: 120, step: 2, defaultValue: 0 },
       ],
-      proceduralElements: [
-        {
-          id: 'fb_aux_slat',
-          label: 'Upper Wake Deflector Slat',
-          enabled: true,
-          pitchDeg: -8,
-          scale: 1.0,
-          count: 2,
-          minCount: 1,
-          maxCount: 3,
-        },
-      ],
+      proceduralElements: [],
     }),
 
     floor: makePart({
@@ -1472,27 +1498,27 @@ export function createBaselineParts(): Record<PartId, AeroPartData> {
           xFFront: 330,
           xFRear: 1150,
           yMinFront: 0,
-          yMaxFront: 320,
+          yMaxFront: 480,
           yMinRear: 0,
-          yMaxRear: 480,
+          yMaxRear: 550,
           zMinFront: -10,
-          zMaxFront: 185,
+          zMaxFront: 235,
           zMinRear: -10,
-          zMaxRear: 215,
+          zMaxRear: 235,
         }),
         makeFiaBox({
           id: 'rv_floor_body_main',
           label: 'RV-FLOOR-BODY Step Plane',
-          xFFront: 600,
+          xFFront: 430,
           xFRear: 3075,
           yMinFront: 0,
-          yMaxFront: 775,
+          yMaxFront: 910,
           yMinRear: 0,
-          yMaxRear: 755,
+          yMaxRear: 910,
           zMinFront: -10,
-          zMaxFront: 230,
+          zMaxFront: 240,
           zMinRear: -10,
-          zMaxRear: 230,
+          zMaxRear: 240,
         }),
       ],
       cols: 4,
@@ -1555,26 +1581,7 @@ export function createBaselineParts(): Record<PartId, AeroPartData> {
         { id: 'heightMm', label: 'Step-Plane Vertical Trim', unit: 'mm', min: -100, max: 100, step: 2, defaultValue: 0 },
         { id: 'flareMm', label: 'Lateral Edge Seal Width', unit: 'mm', min: -150, max: 150, step: 2, defaultValue: 0 },
       ],
-      proceduralElements: [
-        {
-          id: 'floor_fences',
-          label: 'Underfloor Vortex Fences',
-          enabled: true,
-          pitchDeg: 7,
-          scale: 1.0,
-          count: 3,
-          minCount: 2,
-          maxCount: 4,
-        },
-        {
-          id: 'floor_edge_scroll',
-          label: 'Lateral Floor-Edge Scroll Wing',
-          enabled: true,
-          pitchDeg: 10,
-          scale: 1.0,
-          count: 1,
-        },
-      ],
+      proceduralElements: [],
     }),
 
     sidepods: makePart({
@@ -1595,13 +1602,13 @@ export function createBaselineParts(): Record<PartId, AeroPartData> {
           label: 'RV-SIDEPOD Inlet & Shoulder',
           xFFront: 785,
           xFRear: 1850,
-          yMinFront: 35,
-          yMaxFront: 725,
-          yMinRear: 35,
+          yMinFront: 10,
+          yMaxFront: 755,
+          yMinRear: 10,
           yMaxRear: 755,
-          zMinFront: 50,
+          zMinFront: 15,
           zMaxFront: 700,
-          zMinRear: 50,
+          zMinRear: 15,
           zMaxRear: 700,
         }),
         makeFiaBox({
@@ -1609,14 +1616,14 @@ export function createBaselineParts(): Record<PartId, AeroPartData> {
           label: 'RV-EC Tapered Coke-Bottle',
           xFFront: 1800,
           xFRear: 3365,
-          yMinFront: 35,
+          yMinFront: 10,
           yMaxFront: 755,
-          yMinRear: 35,
-          yMaxRear: 480,
-          zMinFront: 50,
+          yMinRear: 10,
+          yMaxRear: 755,
+          zMinFront: 15,
           zMaxFront: 700,
-          zMinRear: 50,
-          zMaxRear: 655,
+          zMinRear: 15,
+          zMaxRear: 700,
         }),
       ],
       cols: 4,
@@ -1682,18 +1689,7 @@ export function createBaselineParts(): Record<PartId, AeroPartData> {
         { id: 'pitchDeg', label: 'Downwash Ramp Slope', unit: '°', min: -25, max: 25, step: 0.5, defaultValue: 0 },
         { id: 'heightMm', label: 'Shoulder Deck Height', unit: 'mm', min: -120, max: 120, step: 2, defaultValue: 0 },
       ],
-      proceduralElements: [
-        {
-          id: 'sp_cooling_louvers',
-          label: 'Cooling Exit Louver Cascade',
-          enabled: true,
-          pitchDeg: 14,
-          scale: 1.0,
-          count: 4,
-          minCount: 2,
-          maxCount: 6,
-        },
-      ],
+      proceduralElements: [],
     }),
 
     engine_cover: makePart({
@@ -1718,10 +1714,10 @@ export function createBaselineParts(): Record<PartId, AeroPartData> {
           yMaxFront: 705,
           yMinRear: 0,
           yMaxRear: 705,
-          zMinFront: 30,
-          zMaxFront: 1075,
-          zMinRear: 30,
-          zMaxRear: 1075,
+          zMinFront: 15,
+          zMaxFront: 1095,
+          zMinRear: 15,
+          zMaxRear: 1095,
         }),
       ],
       cols: 3,
@@ -1777,16 +1773,7 @@ export function createBaselineParts(): Record<PartId, AeroPartData> {
         { id: 'flareMm', label: 'Cooling Cannon Width', unit: 'mm', min: -150, max: 150, step: 2, defaultValue: 0 },
         { id: 'pitchDeg', label: 'Spine Downwash Taper', unit: '°', min: -20, max: 20, step: 0.5, defaultValue: 0 },
       ],
-      proceduralElements: [
-        {
-          id: 'ec_sharkfin_ext',
-          label: 'Dorsal Sharkfin Sail Extension',
-          enabled: true,
-          pitchDeg: 0,
-          scale: 1.0,
-          count: 1,
-        },
-      ],
+      proceduralElements: [],
     }),
 
     rear_suspension: makePart({
@@ -1805,12 +1792,12 @@ export function createBaselineParts(): Record<PartId, AeroPartData> {
         makeFiaBox({
           id: 'rv_susp_rear_arms',
           label: 'RV-SUSP-REAR Wishbone & RBD',
-          xFFront: 2945,
+          xFFront: 2825,
           xFRear: 3720,
-          yMinFront: 70,
-          yMaxFront: 565,
-          yMinRear: 70,
-          yMaxRear: 565,
+          yMinFront: 50,
+          yMaxFront: 615,
+          yMinRear: 50,
+          yMaxRear: 615,
           zMinFront: 30,
           zMaxFront: 655,
           zMinRear: 30,
@@ -1867,18 +1854,7 @@ export function createBaselineParts(): Record<PartId, AeroPartData> {
         { id: 'heightMm', label: 'Anti-Squat Height Offset', unit: 'mm', min: -120, max: 120, step: 2, defaultValue: 0 },
         { id: 'flareMm', label: 'Brake Duct Winglet Span', unit: 'mm', min: -120, max: 120, step: 2, defaultValue: 0 },
       ],
-      proceduralElements: [
-        {
-          id: 'rsusp_upwash_winglets',
-          label: 'Rear Brake Duct Upwash Cascade',
-          enabled: true,
-          pitchDeg: 13,
-          scale: 1.0,
-          count: 3,
-          minCount: 1,
-          maxCount: 4,
-        },
-      ],
+      proceduralElements: [],
     }),
 
     diffuser: makePart({
@@ -1898,29 +1874,29 @@ export function createBaselineParts(): Record<PartId, AeroPartData> {
           id: 'rv_diffuser_ramp',
           label: 'RV-FLOOR-BODY Diffuser Ramp',
           xFFront: 2605,
-          xFRear: 3650,
+          xFRear: 4165,
           yMinFront: 0,
-          yMaxFront: 505,
+          yMaxFront: 790,
           yMinRear: 0,
-          yMaxRear: 505,
+          yMaxRear: 790,
           zMinFront: -10,
-          zMaxFront: 240,
+          zMaxFront: 515,
           zMinRear: -10,
-          zMaxRear: 360,
+          zMaxRear: 515,
         }),
         makeFiaBox({
           id: 'rv_tail_structure',
           label: 'RV-TAIL Boat-Tail Keel',
           xFFront: 3250,
-          xFRear: 4140,
+          xFRear: 4165,
           yMinFront: 0,
-          yMaxFront: 165,
+          yMaxFront: 180,
           yMinRear: 0,
-          yMaxRear: 165,
+          yMaxRear: 180,
           zMinFront: 0,
-          zMaxFront: 475,
-          zMinRear: 80,
-          zMaxRear: 480,
+          zMaxFront: 515,
+          zMinRear: 60,
+          zMaxRear: 515,
         }),
       ],
       cols: 4,
@@ -1979,26 +1955,7 @@ export function createBaselineParts(): Record<PartId, AeroPartData> {
         { id: 'camberMm', label: 'Tunnel Roof Arch', unit: 'mm', min: -120, max: 120, step: 2, defaultValue: 0 },
         { id: 'flareMm', label: 'Sidewall Exit Width', unit: 'mm', min: -150, max: 150, step: 2, defaultValue: 0 },
       ],
-      proceduralElements: [
-        {
-          id: 'diff_strakes',
-          label: 'Internal Expansion Strakes',
-          enabled: true,
-          pitchDeg: 4,
-          scale: 1.0,
-          count: 3,
-          minCount: 2,
-          maxCount: 4,
-        },
-        {
-          id: 'diff_gurney',
-          label: 'Upper Exit Lip Gurney',
-          enabled: false,
-          pitchDeg: 0,
-          scale: 1.0,
-          count: 1,
-        },
-      ],
+      proceduralElements: [],
     }),
 
     rear_wing: makePart({
@@ -2018,43 +1975,43 @@ export function createBaselineParts(): Record<PartId, AeroPartData> {
           id: 'rv_rw_profiles',
           label: 'RV-RW-PROFILES Upper Cascade',
           xFFront: 3500,
-          xFRear: 4155,
+          xFRear: 4225,
           yMinFront: 0,
-          yMaxFront: 578,
+          yMaxFront: 590,
           yMinRear: 0,
-          yMaxRear: 578,
-          zMinFront: 680,
-          zMaxFront: 882,
-          zMinRear: 695,
-          zMaxRear: 882,
+          yMaxRear: 590,
+          zMinFront: 385,
+          zMaxFront: 1050,
+          zMinRear: 385,
+          zMaxRear: 1050,
         }),
         makeFiaBox({
           id: 'rv_rwep_body',
           label: 'RV-RWEP-BODY Endplate Zone',
           xFFront: 3500,
-          xFRear: 4155,
+          xFRear: 4225,
           yMinFront: 320,
-          yMaxFront: 578,
+          yMaxFront: 590,
           yMinRear: 320,
-          yMaxRear: 578,
+          yMaxRear: 590,
           zMinFront: 120,
-          zMaxFront: 882,
+          zMaxFront: 1050,
           zMinRear: 120,
-          zMaxRear: 882,
+          zMaxRear: 1050,
         }),
         makeFiaBox({
           id: 'rv_rw_pylon',
           label: 'RV-RW-PYLON Swan-Neck',
           xFFront: 3400,
-          xFRear: 3985,
+          xFRear: 4050,
           yMinFront: 0,
-          yMaxFront: 120,
+          yMaxFront: 140,
           yMinRear: 0,
-          yMaxRear: 120,
+          yMaxRear: 140,
           zMinFront: 280,
-          zMaxFront: 875,
-          zMinRear: 320,
-          zMaxRear: 875,
+          zMaxFront: 1050,
+          zMinRear: 280,
+          zMaxRear: 1050,
         }),
       ],
       cols: 4,
@@ -2113,26 +2070,7 @@ export function createBaselineParts(): Record<PartId, AeroPartData> {
         { id: 'camberMm', label: 'Mainplane Spoon Depth', unit: 'mm', min: -120, max: 120, step: 2, defaultValue: 0 },
         { id: 'flareMm', label: 'Endplate Toe / Flare', unit: 'mm', min: -120, max: 120, step: 2, defaultValue: 0 },
       ],
-      proceduralElements: [
-        {
-          id: 'rw_gurney',
-          label: 'Trailing-Edge Gurney Flap',
-          enabled: false,
-          pitchDeg: 0,
-          scale: 1.0,
-          count: 1,
-        },
-        {
-          id: 'rw_endplate_vanes',
-          label: 'Lower Endplate Swirl Vanes',
-          enabled: true,
-          pitchDeg: 12,
-          scale: 1.0,
-          count: 3,
-          minCount: 2,
-          maxCount: 4,
-        },
-      ],
+      proceduralElements: [],
     }),
   };
 }
@@ -2243,7 +2181,28 @@ export function createPresetCagesV2(
   const base = createBaselineParts();
   const res = {} as Record<PartId, CageV2>;
   for (const id of PART_ORDER) {
-    res[id] = createCageV2(grids[id], base[id].centerlineLocked);
+    const baseCage = base[id].cage!;
+    if (preset === 'baseline') {
+      res[id] = cloneCageV2(baseCage);
+    } else {
+      const macro = cloneGrid(grids[id]);
+      const detail = interpolateMacroToDetail(
+        macro,
+        baseCage.detailCols,
+        baseCage.detailRows,
+        baseCage.detailOffsets,
+        base[id].centerlineLocked
+      );
+      res[id] = {
+        macroCols: baseCage.macroCols,
+        macroRows: baseCage.macroRows,
+        detailCols: baseCage.detailCols,
+        detailRows: baseCage.detailRows,
+        macro,
+        detail,
+        detailOffsets: cloneGrid(baseCage.detailOffsets),
+      };
+    }
   }
   return res;
 }

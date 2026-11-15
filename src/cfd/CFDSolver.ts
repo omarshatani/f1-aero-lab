@@ -33,17 +33,17 @@ const FIA_2026_WHEELS = {
 };
 
 const BASELINE_PART_HALF_AREAS: Record<PartId, number> = {
-  front_wing: 0.686,
-  nosecone: 0.495,
-  front_suspension: 0.214,
-  monocoque: 1.331,
-  floor_boards: 0.438,
-  floor: 1.635,
-  sidepods: 1.569,
-  engine_cover: 1.916,
-  rear_suspension: 0.270,
-  diffuser: 0.684,
-  rear_wing: 0.561,
+  front_wing: 0.633,
+  nosecone: 0.423,
+  front_suspension: 0.477,
+  monocoque: 0.780,
+  floor_boards: 0.490,
+  floor: 2.134,
+  sidepods: 1.876,
+  engine_cover: 1.448,
+  rear_suspension: 0.547,
+  diffuser: 0.635,
+  rear_wing: 0.758,
 };
 
 function clamp(v: number, lo: number, hi: number): number {
@@ -638,17 +638,14 @@ export function runCFDSimulation(
     let wakeWeightedSum = 0;
 
     if (partId === 'sidepods') {
-      const spGrid = part.cage?.detail ?? part.grid;
-      const nEntry = spGrid.length;
-      if (nEntry >= 3) {
-        let shoelace2 = 0;
-        for (let u = 0; u < nEntry; u++) {
-          const p0 = spGrid[u][0];
-          const p1 = spGrid[(u + 1) % nEntry][0];
-          shoelace2 += p0.x * p1.y - p1.x * p0.y;
-        }
-        sidepodInletAreaM2 = Math.abs(shoelace2) * 0.5;
+      const nEntry = uSamples + 1;
+      let shoelace2 = 0;
+      for (let iu = 0; iu < nEntry; iu++) {
+        const p0 = surf.points[iu][0];
+        const p1 = surf.points[(iu + 1) % nEntry][0];
+        shoelace2 += p0.x * p1.y - p1.x * p0.y;
       }
+      sidepodInletAreaM2 = Math.abs(shoelace2) * 0.5;
     }
 
     const stripInletH: number[] = [];

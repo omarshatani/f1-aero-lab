@@ -74,13 +74,16 @@ export function sampleSplineSurface(
   uSteps = 22,
   vSteps = 18
 ): SampledSurfaceGrid {
+  const grid = part.cage?.detail ?? part.grid;
+  const cols = grid.length;
+
   // First evaluate v-curves along each control column u
   const colSampled: Vec3[][] = [];
-  for (let u = 0; u < part.cols; u++) {
+  for (let u = 0; u < cols; u++) {
     const col: Vec3[] = [];
     for (let iv = 0; iv <= vSteps; iv++) {
       const sv = iv / vSteps;
-      col.push(evalCurveAlongArray(part.grid[u], sv, false));
+      col.push(evalCurveAlongArray(grid[u], sv, false));
     }
     colSampled.push(col);
   }
@@ -92,7 +95,7 @@ export function sampleSplineSurface(
 
   for (let iv = 0; iv <= vSteps; iv++) {
     const rowCtrl: Vec3[] = [];
-    for (let u = 0; u < part.cols; u++) {
+    for (let u = 0; u < cols; u++) {
       rowCtrl.push(colSampled[u][iv]);
     }
     for (let iu = 0; iu <= uSteps; iu++) {

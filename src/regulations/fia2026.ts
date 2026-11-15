@@ -654,14 +654,66 @@ export function createCageV2(macro: Vec3[][], lockCenterline = false): CageV2 {
 /**
  * Propagate edited control node coordinates across shared seam boundaries.
  */
+const CENTERLINE_LOCKED_PARTS: ReadonlySet<PartId> = new Set([
+  'front_wing',
+  'nosecone',
+  'monocoque',
+  'floor',
+  'engine_cover',
+  'diffuser',
+  'rear_wing',
+]);
+
+interface DetailSeamPair {
+  au: number;
+  av: number;
+  bu: number;
+  bv: number;
+}
+
+function expandSeamPairsDetail(seam: SeamLink): DetailSeamPair[] {
+  const pairs: DetailSeamPair[] = [];
+  const len = Math.min(seam.nodesA.length, seam.nodesB.length);
+  if (len === 0) return pairs;
+  if (len === 1) {
+    pairs.push({
+      au: seam.nodesA[0].u * 3,
+      av: seam.nodesA[0].v * 3,
+      bu: seam.nodesB[0].u * 3,
+      bv: seam.nodesB[0].v * 3,
+    });
+    return pairs;
+  }
+  for (let i = 0; i < len - 1; i++) {
+    const a0 = seam.nodesA[i];
+    const a1 = seam.nodesA[i + 1];
+    const b0 = seam.nodesB[i];
+    const b1 = seam.nodesB[i + 1];
+    const startStep = i === 0 ? 0 : 1;
+    for (let step = startStep; step <= 3; step++) {
+      pairs.push({
+        au: a0.u * 3 + step * (a1.u - a0.u),
+        av: a0.v * 3 + step * (a1.v - a0.v),
+        bu: b0.u * 3 + step * (b1.u - b0.u),
+        bv: b0.v * 3 + step * (b1.v - b0.v),
+      });
+    }
+  }
+  return pairs;
+}
+
 export function syncSharedSeamNodes(
   sourcePartId: PartId,
   u: number,
   v: number,
   newPosition: Vec3,
   cages: Partial<Record<PartId, CageV2>>,
-  handleLevel: SculptHandleLevel = 'macro'
+  handleLevel: SculptHandleLevel = 'detail',
+  centerlineLockedMap?: Partial<Record<PartId, boolean>>
 ): void {
+  const isLocked = (id: PartId): boolean =>
+    centerlineLockedMap?.[id] ?? CENTERLINE_LOCKED_PARTS.has(id);
+
   for (const seam of SEAM_LINKS) {
     if (handleLevel === 'macro') {
       if (seam.partA === sourcePartId) {
@@ -670,12 +722,18 @@ export function syncSharedSeamNodes(
           const target = seam.nodesB[idx];
           const cageB = cages[seam.partB];
           if (cageB) {
-            cageB.macro[target.u][target.v] = { ...newPosition };
+            const posB: Vec3 = {
+              x: isLocked(seam.partB) && target.u === 0 ? 0 : newPosition.x,
+              y: newPosition.y,
+              z: newPosition.z,
+            };
+            cageB.macro[target.u][target.v] = posB;
             cageB.detail = interpolateMacroToDetail(
               cageB.macro,
               cageB.detailCols,
               cageB.detailRows,
-              cageB.detailOffsets
+              cageB.detailOffsets,
+              isLocked(seam.partB)
             );
           }
         }
@@ -685,15 +743,74 @@ export function syncSharedSeamNodes(
           const target = seam.nodesA[idx];
           const cageA = cages[seam.partA];
           if (cageA) {
-            cageA.macro[target.u][target.v] = { ...newPosition };
+            const posA: Vec3 = {
+              x: isLocked(seam.partA) && target.u === 0 ? 0 : newPosition.x,
+              y: newPosition.y,
+              z: newPosition.z,
+            };
+            cageA.macro[target.u][target.v] = posA;
             cageA.detail = interpolateMacroToDetail(
               cageA.macro,
               cageA.detailCols,
               cageA.detailRows,
-              cageA.detailOffsets
+              cageA.detailOffsets,
+              isLocked(seam.partA)
             );
           }
         }
+      }
+    } else {
+      const applyDetailTarget = (
+        partnerId: PartId,
+        targetU: number,
+        targetV: number
+      ) => {
+        const partnerCage = cages[partnerId];
+        if (
+          !partnerCage ||
+          targetU < 0 ||
+          targetU >= partnerCage.detailCols ||
+          targetV < 0 ||
+          targetV >= partnerCage.detailRows
+        ) {
+          return;
+        }
+        const posPartner: Vec3 = {
+          x: isLocked(partnerId) && targetU === 0 ? 0 : newPosition.x,
+          y: newPosition.y,
+          z: newPosition.z,
+        };
+        partnerCage.detail[targetU][targetV] = posPartner;
+        if (targetU % 3 === 0 && targetV % 3 === 0) {
+          const mu = targetU / 3;
+          const mv = targetV / 3;
+          if (partnerCage.macro[mu]?.[mv]) {
+            partnerCage.macro[mu][mv] = { ...posPartner };
+          }
+        }
+        const basePt = interpolateMacroToDetail(
+          partnerCage.macro,
+          partnerCage.detailCols,
+          partnerCage.detailRows,
+          undefined,
+          isLocked(partnerId)
+        )[targetU]?.[targetV];
+        if (basePt && partnerCage.detailOffsets[targetU]) {
+          partnerCage.detailOffsets[targetU][targetV] = {
+            x: posPartner.x - basePt.x,
+            y: posPartner.y - basePt.y,
+            z: posPartner.z - basePt.z,
+          };
+        }
+      };
+
+      const pairs = expandSeamPairsDetail(seam);
+      if (seam.partA === sourcePartId) {
+        const match = pairs.find((p) => p.au === u && p.av === v);
+        if (match) applyDetailTarget(seam.partB, match.bu, match.bv);
+      } else if (seam.partB === sourcePartId) {
+        const match = pairs.find((p) => p.bu === u && p.bv === v);
+        if (match) applyDetailTarget(seam.partA, match.au, match.av);
       }
     }
   }
@@ -792,6 +909,7 @@ export function createBaselineParts(): Record<PartId, AeroPartData> {
     const cage = createCageV2(spec.grid, spec.centerlineLocked);
     return {
       ...spec,
+      enabled: spec.enabled ?? true,
       cage,
       grid: cage.macro,
       paramValues: initDefaultParamValues(spec.paramSliders),
@@ -914,9 +1032,9 @@ export function createBaselineParts(): Record<PartId, AeroPartData> {
         },
       ],
       paramSliders: [
-        { id: 'pitchDeg', label: 'Cascade AoA Pitch', unit: '°', min: -6, max: 6, step: 0.5, defaultValue: 0 },
-        { id: 'camberMm', label: 'Spoon & Flap Camber', unit: 'mm', min: -25, max: 25, step: 1, defaultValue: 0 },
-        { id: 'flareMm', label: 'Endplate Outwash Flare', unit: 'mm', min: -20, max: 22, step: 1, defaultValue: 0 },
+        { id: 'pitchDeg', label: 'Cascade AoA Pitch', unit: '°', min: -25, max: 25, step: 0.5, defaultValue: 0 },
+        { id: 'camberMm', label: 'Spoon & Flap Camber', unit: 'mm', min: -120, max: 120, step: 2, defaultValue: 0 },
+        { id: 'flareMm', label: 'Endplate Outwash Flare', unit: 'mm', min: -120, max: 120, step: 2, defaultValue: 0 },
       ],
       proceduralElements: [
         {
@@ -1028,9 +1146,9 @@ export function createBaselineParts(): Record<PartId, AeroPartData> {
         },
       ],
       paramSliders: [
-        { id: 'pitchDeg', label: 'Nose Droop Angle', unit: '°', min: -4, max: 4, step: 0.5, defaultValue: 0 },
-        { id: 'heightMm', label: 'Under-Nose Clearance', unit: 'mm', min: -25, max: 25, step: 1, defaultValue: 0 },
-        { id: 'flareMm', label: 'Cape Cheek Width', unit: 'mm', min: -20, max: 20, step: 1, defaultValue: 0 },
+        { id: 'pitchDeg', label: 'Nose Droop Angle', unit: '°', min: -20, max: 20, step: 0.5, defaultValue: 0 },
+        { id: 'heightMm', label: 'Under-Nose Clearance', unit: 'mm', min: -120, max: 120, step: 2, defaultValue: 0 },
+        { id: 'flareMm', label: 'Cape Cheek Width', unit: 'mm', min: -120, max: 120, step: 2, defaultValue: 0 },
       ],
       proceduralElements: [
         {
@@ -1118,9 +1236,9 @@ export function createBaselineParts(): Record<PartId, AeroPartData> {
         },
       ],
       paramSliders: [
-        { id: 'pitchDeg', label: 'Wishbone Anti-Dive Pitch', unit: '°', min: -5, max: 5, step: 0.5, defaultValue: 0 },
-        { id: 'heightMm', label: 'Roll-Center Height Offset', unit: 'mm', min: -20, max: 20, step: 1, defaultValue: 0 },
-        { id: 'flareMm', label: 'Brake Scoop Width', unit: 'mm', min: -18, max: 18, step: 1, defaultValue: 0 },
+        { id: 'pitchDeg', label: 'Wishbone Anti-Dive Pitch', unit: '°', min: -25, max: 25, step: 0.5, defaultValue: 0 },
+        { id: 'heightMm', label: 'Roll-Center Height Offset', unit: 'mm', min: -120, max: 120, step: 2, defaultValue: 0 },
+        { id: 'flareMm', label: 'Brake Scoop Width', unit: 'mm', min: -120, max: 120, step: 2, defaultValue: 0 },
       ],
       proceduralElements: [
         {
@@ -1181,11 +1299,11 @@ export function createBaselineParts(): Record<PartId, AeroPartData> {
           [1040, 250, 665],
           [1550, 200, 720],
         ],
-        // u=2: Lower tub flank & outboard mirror pod zone
+        // u=2: Lower tub flank & outboard waist
         [
           [-50, 240, 300],
           [460, 320, 380],
-          [1040, 560, 640],
+          [1040, 265, 360],
           [1550, 270, 500],
         ],
       ]),
@@ -1213,9 +1331,9 @@ export function createBaselineParts(): Record<PartId, AeroPartData> {
         },
       ],
       paramSliders: [
-        { id: 'pitchDeg', label: 'Halo & Coaming Rake', unit: '°', min: -3, max: 3, step: 0.5, defaultValue: 0 },
-        { id: 'camberMm', label: 'Cockpit Coaming Arch', unit: 'mm', min: -20, max: 20, step: 1, defaultValue: 0 },
-        { id: 'flareMm', label: 'Mirror Stalk Span', unit: 'mm', min: -25, max: 25, step: 1, defaultValue: 0 },
+        { id: 'pitchDeg', label: 'Halo & Coaming Rake', unit: '°', min: -15, max: 15, step: 0.5, defaultValue: 0 },
+        { id: 'camberMm', label: 'Cockpit Coaming Arch', unit: 'mm', min: -100, max: 100, step: 2, defaultValue: 0 },
+        { id: 'flareMm', label: 'Mirror Stalk Span', unit: 'mm', min: -120, max: 120, step: 2, defaultValue: 0 },
       ],
       proceduralElements: [
         {
@@ -1317,9 +1435,9 @@ export function createBaselineParts(): Record<PartId, AeroPartData> {
         },
       ],
       paramSliders: [
-        { id: 'flareMm', label: 'Vane Inwash/Outwash Yaw', unit: 'mm', min: -35, max: 30, step: 1, defaultValue: 0 },
-        { id: 'pitchDeg', label: 'Slat Vertical Rake', unit: '°', min: -5, max: 5, step: 0.5, defaultValue: 0 },
-        { id: 'camberMm', label: 'Cascade Curvature', unit: 'mm', min: -25, max: 25, step: 1, defaultValue: 0 },
+        { id: 'flareMm', label: 'Vane Inwash/Outwash Yaw', unit: 'mm', min: -150, max: 150, step: 2, defaultValue: 0 },
+        { id: 'pitchDeg', label: 'Slat Vertical Rake', unit: '°', min: -25, max: 25, step: 0.5, defaultValue: 0 },
+        { id: 'camberMm', label: 'Cascade Curvature', unit: 'mm', min: -120, max: 120, step: 2, defaultValue: 0 },
       ],
       proceduralElements: [
         {
@@ -1433,9 +1551,9 @@ export function createBaselineParts(): Record<PartId, AeroPartData> {
         },
       ],
       paramSliders: [
-        { id: 'camberMm', label: 'Venturi Throat Roof Arch', unit: 'mm', min: -22, max: 25, step: 1, defaultValue: 0 },
-        { id: 'heightMm', label: 'Step-Plane Vertical Trim', unit: 'mm', min: -18, max: 22, step: 1, defaultValue: 0 },
-        { id: 'flareMm', label: 'Lateral Edge Seal Width', unit: 'mm', min: -25, max: 20, step: 1, defaultValue: 0 },
+        { id: 'camberMm', label: 'Venturi Throat Roof Arch', unit: 'mm', min: -120, max: 120, step: 2, defaultValue: 0 },
+        { id: 'heightMm', label: 'Step-Plane Vertical Trim', unit: 'mm', min: -100, max: 100, step: 2, defaultValue: 0 },
+        { id: 'flareMm', label: 'Lateral Edge Seal Width', unit: 'mm', min: -150, max: 150, step: 2, defaultValue: 0 },
       ],
       proceduralElements: [
         {
@@ -1517,16 +1635,16 @@ export function createBaselineParts(): Record<PartId, AeroPartData> {
           [3250, 195, 285],
         ],
         [
-          [1060, 665, 445],
-          [1750, 705, 415],
-          [2520, 495, 325],
+          [1050, 665, 425],
+          [1750, 705, 405],
+          [2520, 495, 320],
           [3250, 225, 240],
         ],
         [
-          [1080, 565, 205],
-          [1750, 585, 190],
-          [2520, 425, 165],
-          [3250, 205, 155],
+          [1065, 320, 205],
+          [1750, 340, 190],
+          [2520, 285, 165],
+          [3250, 165, 155],
         ],
       ]),
       subZones: [
@@ -1560,9 +1678,9 @@ export function createBaselineParts(): Record<PartId, AeroPartData> {
         },
       ],
       paramSliders: [
-        { id: 'flareMm', label: 'Sidepod Width / Undercut', unit: 'mm', min: -55, max: 35, step: 2, defaultValue: 0 },
-        { id: 'pitchDeg', label: 'Downwash Ramp Slope', unit: '°', min: -5, max: 5, step: 0.5, defaultValue: 0 },
-        { id: 'heightMm', label: 'Shoulder Deck Height', unit: 'mm', min: -35, max: 30, step: 1, defaultValue: 0 },
+        { id: 'flareMm', label: 'Sidepod Width / Undercut', unit: 'mm', min: -150, max: 150, step: 2, defaultValue: 0 },
+        { id: 'pitchDeg', label: 'Downwash Ramp Slope', unit: '°', min: -25, max: 25, step: 0.5, defaultValue: 0 },
+        { id: 'heightMm', label: 'Shoulder Deck Height', unit: 'mm', min: -120, max: 120, step: 2, defaultValue: 0 },
       ],
       proceduralElements: [
         {
@@ -1655,9 +1773,9 @@ export function createBaselineParts(): Record<PartId, AeroPartData> {
         },
       ],
       paramSliders: [
-        { id: 'heightMm', label: 'Sharkfin Spine Height', unit: 'mm', min: -35, max: 35, step: 1, defaultValue: 0 },
-        { id: 'flareMm', label: 'Cooling Cannon Width', unit: 'mm', min: -30, max: 30, step: 1, defaultValue: 0 },
-        { id: 'pitchDeg', label: 'Spine Downwash Taper', unit: '°', min: -4, max: 4, step: 0.5, defaultValue: 0 },
+        { id: 'heightMm', label: 'Sharkfin Spine Height', unit: 'mm', min: -150, max: 150, step: 2, defaultValue: 0 },
+        { id: 'flareMm', label: 'Cooling Cannon Width', unit: 'mm', min: -150, max: 150, step: 2, defaultValue: 0 },
+        { id: 'pitchDeg', label: 'Spine Downwash Taper', unit: '°', min: -20, max: 20, step: 0.5, defaultValue: 0 },
       ],
       proceduralElements: [
         {
@@ -1745,9 +1863,9 @@ export function createBaselineParts(): Record<PartId, AeroPartData> {
         },
       ],
       paramSliders: [
-        { id: 'pitchDeg', label: 'Wishbone Upwash Pitch', unit: '°', min: -5, max: 5, step: 0.5, defaultValue: 0 },
-        { id: 'heightMm', label: 'Anti-Squat Height Offset', unit: 'mm', min: -20, max: 20, step: 1, defaultValue: 0 },
-        { id: 'flareMm', label: 'Brake Duct Winglet Span', unit: 'mm', min: -18, max: 18, step: 1, defaultValue: 0 },
+        { id: 'pitchDeg', label: 'Wishbone Upwash Pitch', unit: '°', min: -25, max: 25, step: 0.5, defaultValue: 0 },
+        { id: 'heightMm', label: 'Anti-Squat Height Offset', unit: 'mm', min: -120, max: 120, step: 2, defaultValue: 0 },
+        { id: 'flareMm', label: 'Brake Duct Winglet Span', unit: 'mm', min: -120, max: 120, step: 2, defaultValue: 0 },
       ],
       proceduralElements: [
         {
@@ -1857,9 +1975,9 @@ export function createBaselineParts(): Record<PartId, AeroPartData> {
         },
       ],
       paramSliders: [
-        { id: 'pitchDeg', label: 'Diffuser Expansion Angle', unit: '°', min: -5, max: 6, step: 0.5, defaultValue: 0 },
-        { id: 'camberMm', label: 'Tunnel Roof Arch', unit: 'mm', min: -25, max: 25, step: 1, defaultValue: 0 },
-        { id: 'flareMm', label: 'Sidewall Exit Width', unit: 'mm', min: -25, max: 25, step: 1, defaultValue: 0 },
+        { id: 'pitchDeg', label: 'Diffuser Expansion Angle', unit: '°', min: -25, max: 25, step: 0.5, defaultValue: 0 },
+        { id: 'camberMm', label: 'Tunnel Roof Arch', unit: 'mm', min: -120, max: 120, step: 2, defaultValue: 0 },
+        { id: 'flareMm', label: 'Sidewall Exit Width', unit: 'mm', min: -150, max: 150, step: 2, defaultValue: 0 },
       ],
       proceduralElements: [
         {
@@ -1991,9 +2109,9 @@ export function createBaselineParts(): Record<PartId, AeroPartData> {
         },
       ],
       paramSliders: [
-        { id: 'pitchDeg', label: 'Cascade AoA Incidence', unit: '°', min: -7, max: 6, step: 0.5, defaultValue: 0 },
-        { id: 'camberMm', label: 'Mainplane Spoon Depth', unit: 'mm', min: -28, max: 25, step: 1, defaultValue: 0 },
-        { id: 'flareMm', label: 'Endplate Toe / Flare', unit: 'mm', min: -22, max: 22, step: 1, defaultValue: 0 },
+        { id: 'pitchDeg', label: 'Cascade AoA Incidence', unit: '°', min: -25, max: 25, step: 0.5, defaultValue: 0 },
+        { id: 'camberMm', label: 'Mainplane Spoon Depth', unit: 'mm', min: -120, max: 120, step: 2, defaultValue: 0 },
+        { id: 'flareMm', label: 'Endplate Toe / Flare', unit: 'mm', min: -120, max: 120, step: 2, defaultValue: 0 },
       ],
       proceduralElements: [
         {
@@ -2050,8 +2168,8 @@ export function createPresetGrids(
     result.floor[3][2].y -= 0.010;
     result.floor[3][3].y -= 0.008;
 
-    result.sidepods[3][0].x -= 0.065;
-    result.sidepods[3][1].x -= 0.075;
+    result.sidepods[3][0].x -= 0.045;
+    result.sidepods[3][1].x -= 0.055;
     result.sidepods[1][2].y -= 0.042;
     result.sidepods[1][3].y -= 0.038;
 

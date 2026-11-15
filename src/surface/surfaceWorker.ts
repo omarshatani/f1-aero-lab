@@ -26,6 +26,8 @@ ctx.onmessage = (event: MessageEvent<SurfaceWorkerRequest>) => {
   const targetPartIds: PartId[] =
     req.type === 'tessellate_part' && req.partId ? [req.partId] : PART_ORDER;
 
+  const aeroMode = req.aeroMode ?? 'z_mode';
+
   for (const partId of targetPartIds) {
     let partData = req.parts?.[partId];
     if (!partData) {
@@ -36,7 +38,7 @@ ctx.onmessage = (event: MessageEvent<SurfaceWorkerRequest>) => {
       }
     }
 
-    const surface = evaluatePartSurface(partData, req.lod, req.vizMode);
+    const surface = evaluatePartSurface(partData, req.lod, req.vizMode, undefined, aeroMode);
     surfaces[partId] = surface;
 
     transferables.push(
@@ -45,6 +47,9 @@ ctx.onmessage = (event: MessageEvent<SurfaceWorkerRequest>) => {
       surface.colors.buffer as Transferable,
       surface.indices.buffer as Transferable
     );
+    if (surface.shades) {
+      transferables.push(surface.shades.buffer as Transferable);
+    }
   }
 
   const durationMs = performance.now() - startTime;

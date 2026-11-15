@@ -1,4 +1,10 @@
-import { AeroPartData, CageV2, PartId, SurfaceVizMode } from '../types/aero';
+import {
+  ActiveAeroMode,
+  AeroPartData,
+  CageV2,
+  PartId,
+  SurfaceVizMode,
+} from '../types/aero';
 import { evaluateAllSurfaces, evaluatePartSurface } from './PatchEvaluator';
 import {
   EvaluatedPartSurface,
@@ -66,10 +72,11 @@ export class LODManager {
    */
   public evaluatePreviewPart(
     part: AeroPartData,
-    vizMode: SurfaceVizMode = 'carbon'
+    vizMode: SurfaceVizMode = 'carbon',
+    aeroMode: ActiveAeroMode = 'z_mode'
   ): EvaluatedPartSurface {
     this.setStatus('preview_active');
-    return evaluatePartSurface(part, 'preview', vizMode);
+    return evaluatePartSurface(part, 'preview', vizMode, undefined, aeroMode);
   }
 
   /**
@@ -77,10 +84,11 @@ export class LODManager {
    */
   public evaluatePreviewAll(
     parts: Record<PartId, AeroPartData>,
-    vizMode: SurfaceVizMode = 'carbon'
+    vizMode: SurfaceVizMode = 'carbon',
+    aeroMode: ActiveAeroMode = 'z_mode'
   ): Record<PartId, EvaluatedPartSurface> {
     this.setStatus('preview_active');
-    return evaluateAllSurfaces(parts, 'preview', vizMode);
+    return evaluateAllSurfaces(parts, 'preview', vizMode, undefined, aeroMode);
   }
 
   /**
@@ -89,16 +97,20 @@ export class LODManager {
    */
   public requestFullLOD(
     parts: Record<PartId, AeroPartData>,
-    vizMode: SurfaceVizMode = 'carbon'
+    vizMode: SurfaceVizMode = 'carbon',
+    aeroMode: ActiveAeroMode = 'z_mode'
   ): Promise<Partial<Record<PartId, EvaluatedPartSurface>>> {
     const requestId = ++this.requestIdCounter;
     this.setStatus('tessellating_full');
 
     const cages: Partial<Record<PartId, CageV2>> = {};
+    const wireParts: Partial<Record<PartId, AeroPartData>> = {};
     for (const key of Object.keys(parts) as PartId[]) {
-      if (parts[key].cage) {
-        cages[key] = parts[key].cage;
+      const p = parts[key];
+      if (p.cage) {
+        cages[key] = p.cage;
       }
+      wireParts[key] = { ...p };
     }
 
     if (this.worker) {
@@ -109,7 +121,9 @@ export class LODManager {
           requestId,
           lod: 'full',
           cages,
+          parts: wireParts,
           vizMode,
+          aeroMode,
         };
         this.worker!.postMessage(req);
       });
@@ -117,7 +131,7 @@ export class LODManager {
 
     // Fallback if WebWorker unavailable (e.g. Node tests / SSR)
     const startTime = performance.now();
-    const evaluated = evaluateAllSurfaces(parts, 'full', vizMode);
+    const evaluated = evaluateAllSurfaces(parts, 'full', vizMode, undefined, aeroMode);
     const durationMs = performance.now() - startTime;
     this.setStatus('full_ready', durationMs);
     return Promise.resolve(evaluated);

@@ -6,14 +6,10 @@ console.log('=== TEST PR F: STUDIO HUD, V2 CONTROLS & DOCS ===\n');
 
 const store = new CarProjectStore();
 
-// 1. Test Macro / Detail Handle Level
-console.log('1. Testing Handle Level toggling...');
-if (store.activeHandleLevel !== 'macro') throw new Error(`Expected default handle level 'macro', got ${store.activeHandleLevel}`);
-store.setActiveHandleLevel('detail');
-if (store.activeHandleLevel !== 'detail') throw new Error(`Expected handle level 'detail' after toggle`);
-store.setActiveHandleLevel('macro');
-if (store.activeHandleLevel !== 'macro') throw new Error(`Expected handle level 'macro' after toggle`);
-console.log('✓ Macro and Detail handle level toggling verified!\n');
+// 1. Test Default Detail Handle Level
+console.log('1. Testing Dense Detail Handle Level default...');
+if (store.activeHandleLevel !== 'detail') throw new Error(`Expected default handle level 'detail', got ${store.activeHandleLevel}`);
+console.log('✓ Dense Detail handle level default verified!\n');
 
 // 2. Test Fixture Visibility Toggling
 console.log('2. Testing Vehicle Fixture visibility...');

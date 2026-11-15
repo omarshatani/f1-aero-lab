@@ -234,6 +234,8 @@ export interface AeroPartData {
   description: string;
   role: SurfaceRole;
   accentHex: string;
+  /** Whether this component is currently attached to the car (true by default) */
+  enabled?: boolean;
   /** If true, spanwise index u=0 is locked onto the car symmetry plane X=0 */
   centerlineLocked: boolean;
   /** Nominal shell/airfoil skin tolerance in meters */
@@ -407,6 +409,11 @@ export interface CarDesignSnapshot {
     copFrontPct: number;
     downforceN: number;
     dragN: number;
+    topSpeedEstKmh?: number;
+    highSpeedCornerG?: number;
+    partMetrics?: Partial<
+      Record<PartId, { downforceN: number; dragN: number; cl: number; cd: number }>
+    >;
   };
 }
 
@@ -424,6 +431,7 @@ export interface CarDesignSnapshotV2 {
       }
     >
   >;
+  enabledParts?: Partial<Record<PartId, boolean>>;
   paramValues?: Partial<Record<PartId, Record<string, number>>>;
   proceduralElements?: Partial<Record<PartId, ProceduralElementConfig[]>>;
   wheelStance?: WheelStanceSettings;
@@ -435,6 +443,11 @@ export interface CarDesignSnapshotV2 {
     copFrontPct: number;
     downforceN: number;
     dragN: number;
+    topSpeedEstKmh?: number;
+    highSpeedCornerG?: number;
+    partMetrics?: Partial<
+      Record<PartId, { downforceN: number; dragN: number; cl: number; cd: number }>
+    >;
   };
 }
 

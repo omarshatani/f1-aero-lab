@@ -32,7 +32,7 @@ function computeGridSignature(
   aeroMode: ActiveAeroMode
 ): string {
   const grid = part.cage?.detail ?? part.grid;
-  let s = `${clamp ? 1 : 0}:${aeroMode}:`;
+  let s = `${part.enabled !== false ? 1 : 0}:${clamp ? 1 : 0}:${aeroMode}:`;
   for (let u = 0; u < grid.length; u++) {
     const col = grid[u];
     for (let v = 0; v < col.length; v++) {
@@ -201,7 +201,9 @@ export class SceneManager {
       this.store,
       () => this.partMeshes,
       (partId, recomputeCfd) => {
-        this.deformSinglePart(partId, true);
+        for (const pId of PART_ORDER) {
+          this.deformSinglePart(pId, pId === partId);
+        }
         this.updateActiveLegalityVisuals();
         if (recomputeCfd) {
           this.store.runCFD();
@@ -209,19 +211,7 @@ export class SceneManager {
           this.store.emit();
 
           // Dispatch background full-LOD tessellation in worker on drag release
-          void this.lodManager
-            .requestFullLOD(this.store.parts, this.store.surfaceVizMode)
-            .then((surfaces) => {
-              for (const pId of PART_ORDER) {
-                const s = surfaces[pId];
-                if (s) {
-                  const m = this.partMeshes.get(pId);
-                  if (m) {
-                    updateBufferGeometryFromSurface(m.geometry, s);
-                  }
-                }
-              }
-            });
+          this.requestFullLODUpdate();
         }
       }
     );
@@ -245,6 +235,8 @@ export class SceneManager {
     if (!this.store.canUndo()) {
       this.store.setCurrentAsBaseline('Official FIA 2026 Spec');
     }
+    this.store.setModelLoading(false, 100, '');
+    this.requestFullLODUpdate();
 
     this.animate();
   }
@@ -254,6 +246,7 @@ export class SceneManager {
     const legalityPts: MeshCFDData['legalityPts'] = {};
 
     for (const id of PART_ORDER) {
+      if (this.store.parts[id].enabled === false) continue;
       const mesh = this.partMeshes.get(id);
       if (mesh) {
         const extracted = extractMeshPanelsAndLegality(mesh);
@@ -289,7 +282,14 @@ export class SceneManager {
     }
 
     for (const id of PART_ORDER) {
-      this.deformSinglePart(id, false);
+      const partEnabled = this.store.parts[id].enabled !== false;
+      const mesh = this.partMeshes.get(id);
+      if (mesh) {
+        mesh.visible = partEnabled;
+      }
+      if (partEnabled) {
+        this.deformSinglePart(id, false);
+      }
 
       const mat = this.partMaterials.get(id)!;
       const ghost = !isCfd && this.store.ghostOtherParts && id !== this.store.activePartId;
@@ -301,8 +301,9 @@ export class SceneManager {
 
     this.recolorAllParts();
 
-    this.legalityViz.setVisible(!isCfd && this.store.showFiaBox);
-    if (!isCfd) {
+    const activeEnabled = this.store.getActivePart().enabled !== false;
+    this.legalityViz.setVisible(!isCfd && this.store.showFiaBox && activeEnabled);
+    if (!isCfd && activeEnabled) {
       this.updateActiveLegalityVisuals();
     }
 
@@ -342,6 +343,25 @@ export class SceneManager {
     if (mesh) {
       updateBufferGeometryFromSurface(mesh.geometry, surface);
     }
+  }
+
+  private requestFullLODUpdate(): void {
+    const visualAeroMode: ActiveAeroMode =
+      this.store.appMode === 'cfd' ? this.store.tunnelSettings.activeAeroMode : 'z_mode';
+    void this.lodManager
+      .requestFullLOD(this.store.parts, this.store.surfaceVizMode, visualAeroMode)
+      .then((surfaces) => {
+        for (const pId of PART_ORDER) {
+          const s = surfaces[pId];
+          if (s) {
+            const m = this.partMeshes.get(pId);
+            if (m) {
+              updateBufferGeometryFromSurface(m.geometry, s);
+            }
+          }
+        }
+        this.recolorAllParts();
+      });
   }
 
   private recolorAllParts(): void {

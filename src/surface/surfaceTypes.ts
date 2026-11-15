@@ -1,4 +1,10 @@
-import { AeroPartData, CageV2, PartId, SurfaceVizMode } from '../types/aero';
+import {
+  ActiveAeroMode,
+  AeroPartData,
+  CageV2,
+  PartId,
+  SurfaceVizMode,
+} from '../types/aero';
 
 export type LODLevel = 'preview' | 'full';
 
@@ -17,6 +23,7 @@ export interface EvaluatedPartSurface {
   positions: Float32Array;
   normals: Float32Array;
   colors: Float32Array;
+  shades?: Uint8Array;
   indices: Uint32Array;
   vertexCount: number;
   triangleCount: number;
@@ -30,6 +37,7 @@ export interface SurfaceWorkerRequest {
   cages?: Partial<Record<PartId, CageV2>>;
   parts?: Partial<Record<PartId, AeroPartData>>;
   vizMode?: SurfaceVizMode;
+  aeroMode?: ActiveAeroMode;
 }
 
 export interface SurfaceWorkerResponse {

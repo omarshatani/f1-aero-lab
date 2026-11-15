@@ -8,22 +8,21 @@ import {
   FixtureId,
   PartCategory,
   PartId,
-  SculptHandleLevel,
   SculptSelectMode,
   StreamlineColorMode,
   SurfaceVizMode,
   WheelStanceSettings,
 } from '../types/aero';
 
-function fmtDelta(val: number, base: number, digits = 2, invertGood = false): string {
+function fmtDelta(val: number, base: number, digits = 2, invertGood = false, unit = ''): string {
   const diff = val - base;
   if (Math.abs(diff) < Math.pow(10, -digits) * 0.5) {
-    return `<span class="delta-neutral">±0</span>`;
+    return `<span class="delta-neutral">±0${unit}</span>`;
   }
   const sign = diff > 0 ? '+' : '';
   const good = invertGood ? diff < 0 : diff > 0;
   const cls = good ? 'delta-pos' : 'delta-neg';
-  return `<span class="${cls}">${sign}${diff.toFixed(digits)}</span>`;
+  return `<span class="${cls}">${sign}${diff.toFixed(digits)}${unit}</span>`;
 }
 
 function fmtSigned(val: number, digits = 0, unit = ''): string {
@@ -147,7 +146,10 @@ export class HudController {
           <div>
             <div class="section-title">
               <span>2. Component Sub-Zones</span>
-              <button class="btn btn-sm" id="btn-reset-part">Reset Part</button>
+              <div style="display:flex;gap:4px;">
+                <button class="btn btn-sm" id="btn-toggle-active-part" title="Attach or remove this component from the car">Attached (ON)</button>
+                <button class="btn btn-sm" id="btn-reset-part">Reset Part</button>
+              </div>
             </div>
             <div class="control-group">
               <div class="subzone-chips" id="subzone-list"></div>
@@ -193,15 +195,9 @@ export class HudController {
 
           <div>
             <div class="section-title">
-              <span>7. 3D FFD Lattice & Gizmo</span>
+              <span>7. 3D Dense Control Lattice & Gizmo</span>
             </div>
             <div class="control-group">
-              <div style="font-size:11px;color:var(--text-muted);">Control Lattice Level (Shortcut: <b>M</b>)</div>
-              <div class="seg-grid-2" id="handle-level-btns">
-                <button class="btn active" data-level="macro">Macro (Coarse)</button>
-                <button class="btn" data-level="detail">Detail (Dense)</button>
-              </div>
-
               <div style="font-size:11px;color:var(--text-muted);margin-top:2px;">Selection Target</div>
               <div class="seg-grid-5" id="select-mode-btns">
                 <button class="btn" data-sel="node">Free Node</button>
@@ -212,17 +208,18 @@ export class HudController {
               </div>
 
               <div style="font-size:11px;color:var(--text-muted);margin-top:2px;">3D Gizmo Action</div>
-              <div class="seg-grid-2" id="gizmo-mode-btns">
-                <button class="btn" data-gizmo="translate">Bend / Move (G)</button>
-                <button class="btn" data-gizmo="rotate">Twist / Pitch (R)</button>
+              <div class="seg-grid-3" id="gizmo-mode-btns">
+                <button class="btn" data-gizmo="translate">Move (G)</button>
+                <button class="btn" data-gizmo="rotate">Twist (R)</button>
+                <button class="btn" data-gizmo="scale">Scale (T)</button>
               </div>
 
               <div class="slider-row">
                 <div class="slider-header">
                   <span>Soft Bend Radius</span>
-                  <span class="slider-val" id="val-falloff">0.24 m</span>
+                  <span class="slider-val" id="val-falloff">0.00 m</span>
                 </div>
-                <input type="range" id="inp-falloff" min="0" max="0.65" step="0.02" value="0.24" />
+                <input type="range" id="inp-falloff" min="0" max="1.50" step="0.02" value="0.00" />
               </div>
 
               <div class="coord-readout" id="sculpt-coord-info"></div>
@@ -233,9 +230,10 @@ export class HudController {
             <div class="section-title"><span>8. FIA 2026 Appendix 1 Box & View</span></div>
             <div class="control-group">
               <label class="check-row">
-                <input type="checkbox" id="chk-clamp-fia" checked />
+                <input type="checkbox" id="chk-clamp-fia" />
                 <span>Clamp Bending to FIA 2026 Box</span>
               </label>
+              <button class="btn btn-sm" id="btn-snap-fia" style="margin-top:4px;width:100%;">Snap Active Part to FIA Legal Box</button>
               <label class="check-row">
                 <input type="checkbox" id="chk-show-fia" checked />
                 <span>Show 3D FIA Reference Volume</span>
@@ -374,7 +372,7 @@ export class HudController {
           <button class="btn btn-sm" data-cam="top_plan">Top Plan</button>
         </div>
         <div class="hint-line">
-          <b>WASD / Arrows</b> Move Cam (<b>Q/E</b> Up/Dn · <b>Shift</b> Fast) · <b>1–9/0/-</b> Part · <b>G</b> Move · <b>R</b> Twist · <b>M</b> Macro/Detail · <b>Tab</b> CAD / CFD · <b>X</b> Active Aero
+          <b>WASD / Arrows</b> Move Cam (<b>Q/E</b> Up/Dn · <b>Shift</b> Fast) · <b>1–9/0/-</b> Part · <b>Click Car</b> Pick Surface · <b>G</b> Move · <b>R</b> Twist · <b>T</b> Scale · <b>Tab</b> CAD / CFD · <b>X</b> Active Aero
         </div>
       </div>
 
@@ -495,6 +493,10 @@ export class HudController {
       this.sceneMgr.focusPart(this.store.activePartId);
     });
 
+    this.root.querySelector('#btn-toggle-active-part')!.addEventListener('click', () => {
+      this.store.togglePartEnabled(this.store.activePartId);
+    });
+
     this.root.querySelector('#btn-reset-part')!.addEventListener('click', () => {
       this.store.resetActivePartToBaseline();
     });
@@ -530,13 +532,6 @@ export class HudController {
       }
     });
 
-    this.root.querySelectorAll<HTMLButtonElement>('#handle-level-btns button').forEach((btn) => {
-      btn.addEventListener('click', () => {
-        const lvl = btn.dataset.level as SculptHandleLevel;
-        this.store.setActiveHandleLevel(lvl);
-      });
-    });
-
     this.root.querySelectorAll<HTMLButtonElement>('#select-mode-btns button').forEach((btn) => {
       btn.addEventListener('click', () => {
         this.store.selectMode = btn.dataset.sel as SculptSelectMode;
@@ -546,7 +541,7 @@ export class HudController {
 
     this.root.querySelectorAll<HTMLButtonElement>('#gizmo-mode-btns button').forEach((btn) => {
       btn.addEventListener('click', () => {
-        this.store.gizmoMode = btn.dataset.gizmo as 'translate' | 'rotate';
+        this.store.gizmoMode = btn.dataset.gizmo as 'translate' | 'rotate' | 'scale';
         this.store.emit();
       });
     });
@@ -559,6 +554,11 @@ export class HudController {
 
     this.clampCheckbox.addEventListener('change', () => {
       this.store.setClampToFiaBox(this.clampCheckbox.checked);
+    });
+
+    this.root.querySelector('#btn-snap-fia')?.addEventListener('click', () => {
+      this.store.pushUndoCheckpoint();
+      this.store.clampPartToLegality(this.store.activePartId);
     });
 
     this.fiaBoxCheckbox.addEventListener('change', () => {
@@ -702,20 +702,19 @@ export class HudController {
       ) {
         this.store.gizmoMode = 'rotate';
         this.store.emit();
-      } else if (!e.ctrlKey && !e.metaKey && !e.altKey && e.key.toLowerCase() === 'x') {
-        const nextMode: ActiveAeroMode =
-          this.store.tunnelSettings.activeAeroMode === 'z_mode' ? 'x_mode' : 'z_mode';
-        this.store.updateTunnelSettings({ activeAeroMode: nextMode });
       } else if (
         !e.ctrlKey &&
         !e.metaKey &&
         !e.altKey &&
-        e.key.toLowerCase() === 'm' &&
+        e.key.toLowerCase() === 't' &&
         this.store.appMode === 'sculpt'
       ) {
-        const nextLvl: SculptHandleLevel =
-          this.store.activeHandleLevel === 'macro' ? 'detail' : 'macro';
-        this.store.setActiveHandleLevel(nextLvl);
+        this.store.gizmoMode = 'scale';
+        this.store.emit();
+      } else if (!e.ctrlKey && !e.metaKey && !e.altKey && e.key.toLowerCase() === 'x') {
+        const nextMode: ActiveAeroMode =
+          this.store.tunnelSettings.activeAeroMode === 'z_mode' ? 'x_mode' : 'z_mode';
+        this.store.updateTunnelSettings({ activeAeroMode: nextMode });
       } else if (!e.ctrlKey && !e.metaKey && !e.altKey && e.key.toLowerCase() === 'f') {
         this.sceneMgr.focusPart(this.store.activePartId);
       } else if (!e.ctrlKey && !e.metaKey && !e.altKey) {
@@ -838,29 +837,44 @@ export class HudController {
         const idx = PART_ORDER.indexOf(id);
         const p = this.store.parts[id];
         const m = res.partMetrics[id];
+        const isEnabled = p.enabled !== false;
         const sel = id === this.store.activePartId ? 'selected' : '';
-        const badge = m.isLegal
-          ? `<span class="badge badge-legal">OK</span>`
-          : `<span class="badge badge-illegal">OUT</span>`;
+        const disabledCls = isEnabled ? '' : 'part-disabled';
+        const badge = isEnabled
+          ? m.isLegal
+            ? `<span class="badge badge-legal">OK</span>`
+            : `<span class="badge badge-illegal">OUT</span>`
+          : `<span class="badge">OFF</span>`;
         const keyHint = PART_SHORTCUT_KEYS[idx] ?? String(idx + 1);
 
         return `
-          <div class="part-card ${sel}" data-part="${id}" title="${p.name} (${p.articleRef}) — Shortcut [${keyHint}]">
+          <div class="part-card ${sel} ${disabledCls}" data-part="${id}" title="${p.name} (${p.articleRef}) — Shortcut [${keyHint}]">
             <div class="part-row-top">
               <span class="part-name">
                 <span class="part-dot" style="background:${p.accentHex}"></span>
                 <span class="part-num">${idx + 1}.</span> ${p.shortName}
               </span>
-              ${badge}
+              <div style="display:flex;align-items:center;gap:4px;">
+                <button class="part-toggle-btn ${isEnabled ? 'on' : 'off'}" data-toggle-part="${id}" title="${isEnabled ? 'Remove part from car' : 'Attach part to car'}">${isEnabled ? 'ON' : 'OFF'}</button>
+                ${badge}
+              </div>
             </div>
             <div class="part-row-sub">
-              <span>DF ${m.downforceN}N</span>
-              <span>D ${m.dragN}N</span>
+              <span>${isEnabled ? `DF ${m.downforceN}N` : 'Removed'}</span>
+              <span>${isEnabled ? `D ${m.dragN}N` : '0N'}</span>
             </div>
           </div>
         `;
       })
       .join('');
+
+    this.partListEl.querySelectorAll<HTMLButtonElement>('[data-toggle-part]').forEach((btn) => {
+      btn.addEventListener('click', (e) => {
+        e.stopPropagation();
+        const pid = btn.dataset.togglePart as PartId;
+        this.store.togglePartEnabled(pid);
+      });
+    });
 
     this.partListEl.querySelectorAll<HTMLElement>('.part-card').forEach((card) => {
       card.addEventListener('click', () => {
@@ -898,9 +912,11 @@ export class HudController {
     this.subzoneListEl.innerHTML = allChip + zoneChips;
 
     const selectedZone = part.subZones.find((z) => z.id === activeZoneId);
+    const cols = part.cage?.detailCols ?? part.cols;
+    const rows = part.cage?.detailRows ?? part.rows;
     this.subzoneDescEl.textContent = selectedZone
       ? selectedZone.description
-      : `${part.articleRef} — Full ${part.cols}×${part.rows} control lattice active`;
+      : `${part.articleRef} — Full ${cols}×${rows} control lattice active`;
 
     this.subzoneListEl.querySelectorAll<HTMLButtonElement>('.subzone-chip').forEach((btn) => {
       btn.addEventListener('click', () => {
@@ -1260,9 +1276,6 @@ export class HudController {
   }
 
   private syncSculptControls(): void {
-    this.root.querySelectorAll<HTMLButtonElement>('#handle-level-btns button').forEach((btn) => {
-      btn.classList.toggle('active', btn.dataset.level === this.store.activeHandleLevel);
-    });
     this.root.querySelectorAll<HTMLButtonElement>('#select-mode-btns button').forEach((btn) => {
       btn.classList.toggle('active', btn.dataset.sel === this.store.selectMode);
     });
@@ -1280,13 +1293,30 @@ export class HudController {
     this.ghostCheckbox.checked = this.store.ghostOtherParts;
 
     const part = this.store.getActivePart();
+    const isEnabled = part.enabled !== false;
+    const toggleActiveBtn = this.root.querySelector<HTMLButtonElement>('#btn-toggle-active-part');
+    if (toggleActiveBtn) {
+      toggleActiveBtn.textContent = isEnabled ? 'Attached (ON)' : 'Removed (OFF)';
+      toggleActiveBtn.classList.toggle('active', isEnabled);
+    }
+
+    if (!isEnabled) {
+      this.sculptInfoEl.innerHTML = `
+        <span style="color:#f87171;">Part Removed — Click "Removed (OFF)" or "ON" on card to re-attach</span>
+      `;
+      return;
+    }
+
     const { u, v } = this.store.selectedNode;
-    const pt = part.grid[u][v];
+    const activeGrid = part.cage?.detail ?? part.grid;
+    const su = Math.min(activeGrid.length - 1, Math.max(0, u));
+    const sv = Math.min(activeGrid[su].length - 1, Math.max(0, v));
+    const pt = activeGrid[su][sv];
     const fia = worldToFiaMm(pt);
     const clearMm = Math.round(signedMarginInUnion(pt, part.legalityBoxes) * 1000);
 
     this.sculptInfoEl.innerHTML = `
-      <span>FIA [${u},${v}]: X<sub>F</sub>${fia.xF.toFixed(0)} Y${fia.yFia.toFixed(
+      <span>FIA [${su},${sv}]: X<sub>F</sub>${fia.xF.toFixed(0)} Y${fia.yFia.toFixed(
       0
     )} Z${fia.zFia.toFixed(0)}</span>
       <span style="color:${clearMm >= 0 ? '#34d399' : '#f87171'}">RV: ${
@@ -1372,14 +1402,24 @@ export class HudController {
 
     const rowsHtml = PART_ORDER.map((id) => {
       const m = res.partMetrics[id];
-      const stallColor =
-        m.stalledAreaPct > 15 ? '#f87171' : m.stalledAreaPct > 4 ? '#fbbf24' : '#34d399';
+      const isEnabled = this.store.parts[id].enabled !== false;
+      const basePart = base.partMetrics?.[id];
+      const dDfHtml = basePart
+        ? fmtDelta(m.downforceN, basePart.downforceN, 0, false)
+        : '<span class="delta-neutral">—</span>';
+      const dDrHtml = basePart
+        ? fmtDelta(m.dragN, basePart.dragN, 0, true)
+        : '<span class="delta-neutral">—</span>';
+
       return `
-        <tr class="clickable-row" data-jump-part="${id}">
-          <td style="font-family:var(--font-sans);font-weight:500;">${m.name}</td>
-          <td>${m.cl.toFixed(2)}</td>
-          <td>${m.cd.toFixed(2)}</td>
-          <td style="color:${stallColor}">${m.stalledAreaPct.toFixed(0)}%</td>
+        <tr class="clickable-row ${isEnabled ? '' : 'part-disabled-row'}" data-jump-part="${id}">
+          <td style="font-family:var(--font-sans);font-weight:500;">${m.name}${
+        isEnabled ? '' : ' <span style="opacity:0.6">(OFF)</span>'
+      }</td>
+          <td>${m.downforceN}</td>
+          <td>${dDfHtml}</td>
+          <td>${m.dragN}</td>
+          <td>${dDrHtml}</td>
         </tr>
       `;
     }).join('');
@@ -1406,9 +1446,14 @@ export class HudController {
       <div>
         <div class="section-title">
           <span>CFD Telemetry (${res.settings.windSpeedKmh} kph) ${modeTag}</span>
-          <button class="btn btn-sm" id="btn-pin-baseline" title="Save current numbers as delta reference">
-            Pin Baseline
-          </button>
+          <div style="display:flex;gap:4px;">
+            <button class="btn btn-sm" id="btn-reset-car" title="Reset entire car and all parts back to baseline">
+              Reset Car
+            </button>
+            <button class="btn btn-sm" id="btn-pin-baseline" title="Save current numbers as delta reference">
+              Pin Baseline
+            </button>
+          </div>
         </div>
 
         <div class="kpi-grid">
@@ -1420,6 +1465,7 @@ export class HudController {
             <div class="kpi-value">${res.cl.toFixed(3)}</div>
             <div class="kpi-sub">
               <span>${res.totalDownforceN.toLocaleString()} N (${dfKgf} kgf)</span>
+              ${fmtDelta(res.totalDownforceN, base.downforceN, 0, false, ' N')}
             </div>
           </div>
 
@@ -1431,6 +1477,7 @@ export class HudController {
             <div class="kpi-value">${res.cd.toFixed(3)}</div>
             <div class="kpi-sub">
               <span>${res.totalDragN.toLocaleString()} N</span>
+              ${fmtDelta(res.totalDragN, base.dragN, 0, true, ' N')}
             </div>
           </div>
 
@@ -1448,10 +1495,12 @@ export class HudController {
           <div class="kpi-card">
             <div class="kpi-label">
               <span>2026 PROJECTION</span>
+              ${fmtDelta(res.topSpeedEstKmh, base.topSpeedEstKmh ?? res.topSpeedEstKmh, 1, false, ' kph')}
             </div>
             <div class="kpi-value" style="font-size:14.5px;">${res.topSpeedEstKmh.toFixed(0)} km/h</div>
             <div class="kpi-sub">
               <span>240kph Grip: ${res.highSpeedCornerG.toFixed(2)} G</span>
+              ${fmtDelta(res.highSpeedCornerG, base.highSpeedCornerG ?? res.highSpeedCornerG, 2, false, ' G')}
             </div>
           </div>
         </div>
@@ -1460,7 +1509,7 @@ export class HudController {
       <div class="balance-box">
         <div class="slider-header">
           <span style="font-weight:600;font-size:11.5px;">Aero Balance (CoP Front)</span>
-          <span class="slider-val">${res.copFrontPct.toFixed(1)}% Front (Target 44–47.5%)</span>
+          <span class="slider-val">${res.copFrontPct.toFixed(1)}% Front (${fmtDelta(res.copFrontPct, base.copFrontPct, 1, false, '%')})</span>
         </div>
         <div class="balance-track">
           <div class="balance-sweetspot" title="Ideal Neutral Window (44.0% - 47.5%)"></div>
@@ -1473,14 +1522,15 @@ export class HudController {
       </div>
 
       <div>
-        <div class="section-title"><span>2026 Component Breakdown (Click to Edit)</span></div>
+        <div class="section-title"><span>2026 Component Breakdown vs Baseline</span></div>
         <table class="aero-table">
           <thead>
             <tr>
               <th>Component</th>
-              <th>CL</th>
-              <th>CD</th>
-              <th>Stall</th>
+              <th>DF (N)</th>
+              <th>ΔDF</th>
+              <th>Drag (N)</th>
+              <th>ΔDrag</th>
             </tr>
           </thead>
           <tbody>
@@ -1499,6 +1549,10 @@ export class HudController {
         </div>
       </div>
     `;
+
+    this.rightTelemetryEl.querySelector('#btn-reset-car')!.addEventListener('click', () => {
+      this.store.resetCarToBaseline();
+    });
 
     this.rightTelemetryEl.querySelector('#btn-pin-baseline')!.addEventListener('click', () => {
       this.store.setCurrentAsBaseline();

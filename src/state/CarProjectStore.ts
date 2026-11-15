@@ -48,6 +48,7 @@ export interface MeshCFDData {
 interface UndoEntry {
   grids: Record<PartId, Vec3[][]>;
   cages: Record<PartId, CageV2>;
+  enabledParts: Record<PartId, boolean>;
   paramValues: Record<PartId, Record<string, number>>;
   proceduralElements: Record<PartId, ProceduralElementConfig[]>;
   wheelStance: WheelStanceSettings;
@@ -57,9 +58,9 @@ interface UndoEntry {
 export class CarProjectStore {
   public carModelId: CarModelId = 'fia_2026_concept';
   public modelLoading = {
-    active: true,
-    pct: 0,
-    label: 'Initializing Official FIA 2026 CAD Model...',
+    active: false,
+    pct: 100,
+    label: '',
   };
 
   public parts: Record<PartId, AeroPartData> = createBaselineParts();
@@ -70,7 +71,7 @@ export class CarProjectStore {
   public activePartId: PartId = 'front_wing';
   public activeSubZoneId = 'all';
   public selectedNode: NodeIndex = { u: 2, v: 3 };
-  public activeHandleLevel: SculptHandleLevel = 'macro';
+  public activeHandleLevel: SculptHandleLevel = 'detail';
 
   public fixtures: Record<FixtureId, boolean> = (() => {
     const res = {} as Record<FixtureId, boolean>;
@@ -84,9 +85,9 @@ export class CarProjectStore {
 
   public appMode: AppMode = 'sculpt';
   public selectMode: SculptSelectMode = 'node';
-  public gizmoMode: 'translate' | 'rotate' = 'translate';
-  public softFalloffRadius = 0.24;
-  public clampToFiaBox = true;
+  public gizmoMode: 'translate' | 'rotate' | 'scale' = 'translate';
+  public softFalloffRadius = 0.0;
+  public clampToFiaBox = false;
   public ghostOtherParts = false;
   public showFiaBox = true;
 
@@ -187,13 +188,16 @@ export class CarProjectStore {
   private captureUndoEntry(): UndoEntry {
     const paramValues = {} as Record<PartId, Record<string, number>>;
     const proceduralElements = {} as Record<PartId, ProceduralElementConfig[]>;
+    const enabledParts = {} as Record<PartId, boolean>;
     for (const id of PART_ORDER) {
       paramValues[id] = { ...this.parts[id].paramValues };
       proceduralElements[id] = cloneProceduralElements(this.parts[id].proceduralElements);
+      enabledParts[id] = this.parts[id].enabled !== false;
     }
     return {
       grids: this.cloneAllGrids(),
       cages: this.cloneAllCages(),
+      enabledParts,
       paramValues,
       proceduralElements,
       wheelStance: { ...this.wheelStance },
@@ -210,6 +214,7 @@ export class CarProjectStore {
       } else {
         this.parts[id].cage = createCageV2(this.parts[id].grid, this.parts[id].centerlineLocked);
       }
+      this.parts[id].enabled = entry.enabledParts ? entry.enabledParts[id] !== false : true;
       this.parts[id].paramValues = { ...entry.paramValues[id] };
       this.parts[id].proceduralElements = cloneProceduralElements(entry.proceduralElements[id]);
     }
@@ -278,9 +283,11 @@ export class CarProjectStore {
       this.selectMode = 'node';
     }
     const p = this.parts[partId];
+    const cols = p.cage?.detailCols ?? p.cols;
+    const rows = p.cage?.detailRows ?? p.rows;
     this.selectedNode = {
-      u: Math.min(p.cols - 1, Math.floor(p.cols / 2)),
-      v: p.rows - 1,
+      u: Math.min(cols - 1, Math.floor(cols / 2)),
+      v: rows - 1,
     };
     this.emit();
   }
@@ -294,10 +301,13 @@ export class CarProjectStore {
       }
     } else {
       const z = p.subZones.find((s) => s.id === zoneId);
-      if (z && z.uIndices.length > 0 && z.vIndices.length > 0) {
+      const isDetail = Boolean(p.cage);
+      const uList = z ? (isDetail && z.detailUIndices ? z.detailUIndices : z.uIndices.map((u) => (isDetail ? u * 3 : u))) : [];
+      const vList = z ? (isDetail && z.detailVIndices ? z.detailVIndices : z.vIndices.map((v) => (isDetail ? v * 3 : v))) : [];
+      if (uList.length > 0 && vList.length > 0) {
         this.selectedNode = {
-          u: z.uIndices[Math.floor(z.uIndices.length / 2)],
-          v: z.vIndices[Math.floor(z.vIndices.length / 2)],
+          u: uList[Math.floor(uList.length / 2)],
+          v: vList[Math.floor(vList.length / 2)],
         };
         this.selectMode = 'sub_zone';
       }
@@ -307,31 +317,78 @@ export class CarProjectStore {
 
   public setSelectedNode(node: NodeIndex): void {
     const p = this.getActivePart();
+    const maxU = (p.cage?.detailCols ?? p.cols) - 1;
+    const maxV = (p.cage?.detailRows ?? p.rows) - 1;
     this.selectedNode = {
-      u: Math.max(0, Math.min(p.cols - 1, node.u)),
-      v: Math.max(0, Math.min(p.rows - 1, node.v)),
+      u: Math.max(0, Math.min(maxU, node.u)),
+      v: Math.max(0, Math.min(maxV, node.v)),
     };
     this.emit();
+  }
+
+  public setPartEnabled(partId: PartId, enabled: boolean): void {
+    const part = this.parts[partId];
+    if (!part) return;
+    if ((part.enabled !== false) === enabled) return;
+    this.pushUndoCheckpoint();
+    part.enabled = enabled;
+    this.runCFD();
+    this.emit();
+  }
+
+  public togglePartEnabled(partId: PartId): boolean {
+    const part = this.parts[partId];
+    const next = part ? part.enabled === false : true;
+    this.setPartEnabled(partId, next);
+    return next;
   }
 
   public setPartParamValue(partId: PartId, paramId: string, value: number): void {
     const part = this.parts[partId];
     part.paramValues[paramId] = value;
-    part.grid = applyParametricOffsetsToGrid(
+    const deformed = applyParametricOffsetsToGrid(
       this.baseGrids[partId],
       part,
       part.paramValues,
       this.clampToFiaBox
     );
+    if (!part.cage) {
+      part.cage = createCageV2(deformed, part.centerlineLocked);
+    } else {
+      part.cage.macro = cloneGrid(deformed);
+      part.cage.detail = interpolateMacroToDetail(
+        part.cage.macro,
+        part.cage.detailCols,
+        part.cage.detailRows,
+        part.cage.detailOffsets,
+        part.centerlineLocked
+      );
+    }
+    part.grid = part.cage.macro;
+
+    // Sync shared seam neighbors when parametric deformation shifts boundary nodes
+    const allCages: Partial<Record<PartId, CageV2>> = {};
+    for (const id of PART_ORDER) {
+      if (this.parts[id].cage) allCages[id] = this.parts[id].cage;
+    }
+    for (let u = 0; u < part.cols; u++) {
+      for (let v = 0; v < part.rows; v++) {
+        syncSharedSeamNodes(partId, u, v, part.cage.macro[u][v], allCages, 'macro');
+      }
+    }
+    for (const id of PART_ORDER) {
+      const c = this.parts[id].cage;
+      if (c && id !== partId) {
+        this.parts[id].grid = c.macro;
+      }
+    }
+
     this.runCFD();
     this.emit();
   }
 
   public syncBaseGridFromCurrent(partId: PartId): void {
-    this.baseGrids[partId] = cloneGrid(this.parts[partId].grid);
-    for (const s of this.parts[partId].paramSliders) {
-      this.parts[partId].paramValues[s.id] = s.defaultValue;
-    }
+    this.baseGrids[partId] = cloneGrid(this.parts[partId].cage?.macro ?? this.parts[partId].grid);
   }
 
   public setProceduralElementConfig(
@@ -378,9 +435,57 @@ export class CarProjectStore {
     if (clamp) {
       this.pushUndoCheckpoint();
       this.clampPartToLegality(this.activePartId);
-      this.runCFD();
+    } else {
+      this.emit();
     }
-    this.emit();
+  }
+
+  private getAllCagesMap(): Partial<Record<PartId, CageV2>> {
+    const allCages: Partial<Record<PartId, CageV2>> = {};
+    for (const id of PART_ORDER) {
+      if (this.parts[id].cage) allCages[id] = this.parts[id].cage;
+    }
+    return allCages;
+  }
+
+  private syncMacroAndOffsetsFromDetail(partId: PartId): void {
+    const part = this.parts[partId];
+    const cage = part?.cage;
+    if (!cage) return;
+    for (let mu = 0; mu < cage.macroCols; mu++) {
+      const du = mu * 3;
+      if (!cage.detail[du]) continue;
+      for (let mv = 0; mv < cage.macroRows; mv++) {
+        const dv = mv * 3;
+        if (cage.detail[du][dv]) {
+          cage.macro[mu][mv] = { ...cage.detail[du][dv] };
+        }
+      }
+    }
+    const macroInterp = interpolateMacroToDetail(
+      cage.macro,
+      cage.detailCols,
+      cage.detailRows,
+      undefined,
+      part.centerlineLocked
+    );
+    for (let u = 0; u < cage.detailCols; u++) {
+      if (!cage.detailOffsets[u]) {
+        cage.detailOffsets[u] = [];
+      }
+      for (let v = 0; v < cage.detailRows; v++) {
+        const dPt = cage.detail[u]?.[v];
+        const mPt = macroInterp[u]?.[v];
+        if (dPt && mPt) {
+          cage.detailOffsets[u][v] = {
+            x: dPt.x - mPt.x,
+            y: dPt.y - mPt.y,
+            z: dPt.z - mPt.z,
+          };
+        }
+      }
+    }
+    part.grid = cage.macro;
   }
 
   public updatePartGridNode(
@@ -413,10 +518,7 @@ export class CarProjectStore {
       this.baseGrids[partId][u][v] = { ...targetPos };
 
       // Propagate across shared seams
-      const allCages: Partial<Record<PartId, CageV2>> = {};
-      for (const id of PART_ORDER) {
-        if (this.parts[id].cage) allCages[id] = this.parts[id].cage;
-      }
+      const allCages = this.getAllCagesMap();
       syncSharedSeamNodes(partId, u, v, targetPos, allCages, 'macro');
 
       // Update grids and detail cages for all parts
@@ -435,25 +537,13 @@ export class CarProjectStore {
         }
       }
     } else {
-      // Detail handle level: calculate delta from interpolated macro
-      const macroInterp = interpolateMacroToDetail(
-        part.cage.macro,
-        part.cage.detailCols,
-        part.cage.detailRows,
-        undefined,
-        part.centerlineLocked
-      );
-      if (macroInterp[u] && macroInterp[u][v]) {
-        const basePt = macroInterp[u][v];
-        if (!part.cage.detailOffsets[u]) {
-          part.cage.detailOffsets[u] = [];
-        }
-        part.cage.detailOffsets[u][v] = {
-          x: targetPos.x - basePt.x,
-          y: targetPos.y - basePt.y,
-          z: targetPos.z - basePt.z,
-        };
+      if (part.cage.detail[u]?.[v]) {
         part.cage.detail[u][v] = { ...targetPos };
+        const allCages = this.getAllCagesMap();
+        syncSharedSeamNodes(partId, u, v, targetPos, allCages, 'detail');
+        for (const id of PART_ORDER) {
+          this.syncMacroAndOffsetsFromDetail(id);
+        }
       }
     }
 
@@ -463,34 +553,119 @@ export class CarProjectStore {
     this.emit();
   }
 
-  public clampPartToLegality(partId: PartId): void {
+  public updatePartGridBatch(
+    partId: PartId,
+    newGrid: Vec3[][],
+    handleLevel: SculptHandleLevel = this.activeHandleLevel,
+    triggerCfd = this.autoUpdateCfdInSculpt
+  ): void {
     const part = this.parts[partId];
-    for (let u = 0; u < part.cols; u++) {
-      for (let v = 0; v < part.rows; v++) {
-        part.grid[u][v] = clampPointToLegalityBoxes(
-          part.grid[u][v],
-          part.legalityBoxes,
-          part.centerlineLocked && u === 0
-        );
+    if (!part) return;
+    if (!part.cage) {
+      part.cage = createCageV2(part.grid, part.centerlineLocked);
+    }
+
+    const cols = newGrid.length;
+    const rows = newGrid[0]?.length ?? 0;
+
+    if (handleLevel === 'macro') {
+      const allCages = this.getAllCagesMap();
+
+      for (let u = 0; u < Math.min(cols, part.cols); u++) {
+        for (let v = 0; v < Math.min(rows, part.rows); v++) {
+          let targetPos = { ...newGrid[u][v] };
+          if (part.centerlineLocked && u === 0) {
+            targetPos.x = 0;
+          } else {
+            targetPos.x = Math.max(0.001, targetPos.x);
+          }
+          if (this.clampToFiaBox) {
+            targetPos = clampPointToLegalityBoxes(
+              targetPos,
+              part.legalityBoxes,
+              part.centerlineLocked && u === 0
+            );
+          }
+          part.cage.macro[u][v] = targetPos;
+          syncSharedSeamNodes(partId, u, v, targetPos, allCages, 'macro');
+        }
+      }
+
+      for (const id of PART_ORDER) {
+        const c = this.parts[id].cage;
+        if (c) {
+          c.detail = interpolateMacroToDetail(
+            c.macro,
+            c.detailCols,
+            c.detailRows,
+            c.detailOffsets,
+            this.parts[id].centerlineLocked
+          );
+          this.parts[id].grid = c.macro;
+          this.baseGrids[id] = cloneGrid(c.macro);
+        }
+      }
+    } else {
+      const allCages = this.getAllCagesMap();
+      for (let u = 0; u < Math.min(cols, part.cage.detailCols); u++) {
+        for (let v = 0; v < Math.min(rows, part.cage.detailRows); v++) {
+          let targetPos = { ...newGrid[u][v] };
+          const lockCenter = part.centerlineLocked && u === 0;
+          if (lockCenter) {
+            targetPos.x = 0;
+          } else {
+            targetPos.x = Math.max(0.001, targetPos.x);
+          }
+          if (this.clampToFiaBox) {
+            targetPos = clampPointToLegalityBoxes(targetPos, part.legalityBoxes, lockCenter);
+          }
+          part.cage.detail[u][v] = targetPos;
+          syncSharedSeamNodes(partId, u, v, targetPos, allCages, 'detail');
+        }
+      }
+      for (const id of PART_ORDER) {
+        this.syncMacroAndOffsetsFromDetail(id);
       }
     }
-    if (part.cage) {
-      part.cage.macro = cloneGrid(part.grid);
-      part.cage.detail = interpolateMacroToDetail(
-        part.cage.macro,
-        part.cage.detailCols,
-        part.cage.detailRows,
-        part.cage.detailOffsets,
-        part.centerlineLocked
-      );
+
+    if (triggerCfd) {
+      this.runCFD();
+    }
+    this.emit();
+  }
+
+  public clampPartToLegality(partId: PartId): void {
+    const part = this.parts[partId];
+    if (!part) return;
+    if (!part.cage) {
+      part.cage = createCageV2(part.grid, part.centerlineLocked);
+    }
+    const allCages = this.getAllCagesMap();
+    for (let u = 0; u < part.cage.detailCols; u++) {
+      const lockCenter = part.centerlineLocked && u === 0;
+      for (let v = 0; v < part.cage.detailRows; v++) {
+        const clamped = clampPointToLegalityBoxes(
+          part.cage.detail[u][v],
+          part.legalityBoxes,
+          lockCenter
+        );
+        part.cage.detail[u][v] = clamped;
+        syncSharedSeamNodes(partId, u, v, clamped, allCages, 'detail');
+      }
+    }
+    for (const id of PART_ORDER) {
+      this.syncMacroAndOffsetsFromDetail(id);
     }
     this.baseGrids[partId] = cloneGrid(part.grid);
+    this.runCFD();
+    this.emit();
   }
 
   public resetActivePartToBaseline(): void {
     this.pushUndoCheckpoint();
     const defaults = createBaselineParts();
     const defPart = defaults[this.activePartId];
+    this.parts[this.activePartId].enabled = true;
     this.parts[this.activePartId].grid = cloneGrid(defPart.grid);
     this.parts[this.activePartId].cage = cloneCageV2(FITTED_CAGES_V2[this.activePartId]);
     this.baseGrids[this.activePartId] = cloneGrid(defPart.grid);
@@ -502,11 +677,18 @@ export class CarProjectStore {
     this.emit();
   }
 
+  public resetCarToBaseline(): void {
+    this.applyConceptPreset('baseline');
+  }
+
   public applyConceptPreset(preset: 'baseline' | 'high_downforce' | 'low_drag'): void {
     this.pushUndoCheckpoint();
     const grids = createPresetGrids(preset);
     const defaults = createBaselineParts();
     for (const id of PART_ORDER) {
+      if (preset === 'baseline') {
+        this.parts[id].enabled = true;
+      }
       this.parts[id].grid = grids[id];
       this.parts[id].cage = createCageV2(grids[id], this.parts[id].centerlineLocked);
       this.baseGrids[id] = cloneGrid(grids[id]);
@@ -552,14 +734,28 @@ export class CarProjectStore {
     const paramValues = {} as Record<PartId, Record<string, number>>;
     const proceduralElements = {} as Record<PartId, ProceduralElementConfig[]>;
     const cages = {} as Partial<Record<PartId, { macro: Vec3[][]; detailOffsets?: Vec3[][] }>>;
+    const enabledParts = {} as Partial<Record<PartId, boolean>>;
+    const partMetrics = {} as Partial<
+      Record<PartId, { downforceN: number; dragN: number; cl: number; cd: number }>
+    >;
 
     for (const id of PART_ORDER) {
+      enabledParts[id] = this.parts[id].enabled !== false;
       paramValues[id] = { ...this.parts[id].paramValues };
       proceduralElements[id] = cloneProceduralElements(this.parts[id].proceduralElements);
       if (this.parts[id].cage) {
         cages[id] = {
           macro: cloneGrid(this.parts[id].cage!.macro),
           detailOffsets: cloneGrid(this.parts[id].cage!.detailOffsets),
+        };
+      }
+      const pm = this.cfdResult.partMetrics[id];
+      if (pm) {
+        partMetrics[id] = {
+          downforceN: pm.downforceN,
+          dragN: pm.dragN,
+          cl: pm.cl,
+          cd: pm.cd,
         };
       }
     }
@@ -569,6 +765,7 @@ export class CarProjectStore {
       name,
       createdAt: Date.now(),
       carModelId: this.carModelId,
+      enabledParts,
       cages,
       paramValues,
       proceduralElements,
@@ -581,6 +778,9 @@ export class CarProjectStore {
         copFrontPct: this.cfdResult.copFrontPct,
         downforceN: this.cfdResult.totalDownforceN,
         dragN: this.cfdResult.totalDragN,
+        topSpeedEstKmh: this.cfdResult.topSpeedEstKmh,
+        highSpeedCornerG: this.cfdResult.highSpeedCornerG,
+        partMetrics,
       },
     };
   }
@@ -602,6 +802,7 @@ export class CarProjectStore {
         const snapV2 = snapshot as CarDesignSnapshotV2;
         for (const id of PART_ORDER) {
           const part = this.parts[id];
+          part.enabled = snapV2.enabledParts ? snapV2.enabledParts[id] !== false : true;
           const cageData = snapV2.cages?.[id];
           if (cageData && Array.isArray(cageData.macro)) {
             part.grid = cloneGrid(cageData.macro);
@@ -639,6 +840,7 @@ export class CarProjectStore {
         for (const id of PART_ORDER) {
           const incoming = snapV1.parts[id];
           const part = this.parts[id];
+          part.enabled = true;
           if (
             Array.isArray(incoming) &&
             incoming.length === part.cols &&

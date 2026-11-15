@@ -33,17 +33,17 @@ const FIA_2026_WHEELS = {
 };
 
 const BASELINE_PART_HALF_AREAS: Record<PartId, number> = {
-  front_wing: 0.510,
-  nosecone: 0.341,
-  front_suspension: 0.199,
-  monocoque: 0.828,
-  floor_boards: 0.325,
-  floor: 1.542,
-  sidepods: 1.388,
-  engine_cover: 0.997,
-  rear_suspension: 0.263,
-  diffuser: 0.485,
-  rear_wing: 0.417,
+  front_wing: 0.686,
+  nosecone: 0.495,
+  front_suspension: 0.214,
+  monocoque: 1.331,
+  floor_boards: 0.438,
+  floor: 1.635,
+  sidepods: 1.569,
+  engine_cover: 1.916,
+  rear_suspension: 0.270,
+  diffuser: 0.684,
+  rear_wing: 0.561,
 };
 
 function clamp(v: number, lo: number, hi: number): number {
@@ -534,6 +534,37 @@ export function runCFDSimulation(
 
   for (const partId of sequence) {
     const part = parts[partId];
+
+    if (part.enabled === false) {
+      partMetrics[partId] = {
+        partId,
+        name: part.shortName,
+        downforceN: 0,
+        dragN: 0,
+        cl: 0,
+        cd: 0,
+        ldRatio: 0,
+        stalledAreaPct: 0,
+        wakeExposurePct: 0,
+        isLegal: true,
+        minClearanceMm: 100,
+      };
+      partSurfaceMaps[partId] = {
+        upperCp: Array.from({ length: uSamples + 1 }, () => new Array<number>(vSamples + 1).fill(0)),
+        lowerCp: Array.from({ length: uSamples + 1 }, () => new Array<number>(vSamples + 1).fill(0)),
+        separation: Array.from({ length: uSamples + 1 }, () =>
+          new Array<number>(vSamples + 1).fill(0)
+        ),
+      };
+      // Removing structural fairings leaves unfaired radiator/PU hardware exposed to bluff drag
+      if (partId === 'sidepods') {
+        sumDragN += 0.085 * qInf * REF_AREA;
+      } else if (partId === 'engine_cover') {
+        sumDragN += 0.065 * qInf * REF_AREA;
+      }
+      continue;
+    }
+
     const surf = sampleSplineSurface(part, uSamples, vSamples);
     const meshPanels = realMeshPanels?.[partId];
 
@@ -572,8 +603,6 @@ export function runCFDSimulation(
       let realHalfArea = 0;
       for (const mp of meshPanels) {
         realHalfArea += mp.area;
-        if (mp.cz < partMinZ) partMinZ = mp.cz;
-        if (mp.cz > partMaxZ) partMaxZ = mp.cz;
       }
       const baseArea = BASELINE_PART_HALF_AREAS[partId] ?? splineHalfArea;
       if (baseArea > 1e-4) {
@@ -609,11 +638,17 @@ export function runCFDSimulation(
     let wakeWeightedSum = 0;
 
     if (partId === 'sidepods') {
-      const topInletY = Math.max(part.grid[0][0].y, part.grid[1][0].y);
-      const botInletY = part.grid[3][0].y;
-      const inX = part.grid[0][0].x;
-      const outX = part.grid[2][0].x;
-      sidepodInletAreaM2 = Math.max(0, (topInletY - botInletY) * (outX - inX));
+      const spGrid = part.cage?.detail ?? part.grid;
+      const nEntry = spGrid.length;
+      if (nEntry >= 3) {
+        let shoelace2 = 0;
+        for (let u = 0; u < nEntry; u++) {
+          const p0 = spGrid[u][0];
+          const p1 = spGrid[(u + 1) % nEntry][0];
+          shoelace2 += p0.x * p1.y - p1.x * p0.y;
+        }
+        sidepodInletAreaM2 = Math.abs(shoelace2) * 0.5;
+      }
     }
 
     const stripInletH: number[] = [];
@@ -1119,16 +1154,17 @@ export function runCFDSimulation(
               }
               const undercutClearance = clamp(0.70 - cx, 0, 0.35);
               const rampDownwash = Math.max(0, -tv.y);
+              const upScoop = Math.max(0, tv.y);
               if (iu <= 2 && tv.y < 0) {
                 sidepodDownwashScore += -tv.y * quadArea;
               }
               cpUpper = clamp(0.14 * rampDownwash - 0.04, -0.18, 0.35);
-              cpLower = clamp(-0.09 * qRatio, -0.28, 0.10);
+              cpLower = clamp((-0.09 - 0.38 * upScoop) * qRatio, -0.42, 0.10);
               panelDownforce = quadArea * qInf * (cpUpper - cpLower) * 0.18;
               panelDrag =
                 quadArea *
                 qInf *
-                (0.028 * qRatio + 0.032 * rampDownwash - louverDragRelief);
+                (0.028 * qRatio + 0.032 * rampDownwash + 0.48 * upScoop - louverDragRelief);
               addImpulse({
                 x: side * (cx + 0.05),
                 y: Math.max(0.05, cy - 0.05),
@@ -1281,6 +1317,19 @@ export function runCFDSimulation(
     });
   }
 
+  const removedParts = PART_ORDER.filter((id) => parts[id].enabled === false);
+  if (removedParts.length > 0) {
+    diagnostics.push({
+      id: 'detached_parts_config',
+      severity: 'info',
+      title: `Detached Assemblies: ${removedParts.map((id) => parts[id].shortName).join(', ')}`,
+      detail: `${removedParts.length} component${
+        removedParts.length > 1 ? 's are' : ' is'
+      } currently removed from the car configuration (0 N direct aero load, altered downstream wake).`,
+      suggestion: 'Re-attach components from the Sculpt Studio cards or compare gains in Telemetry.',
+    });
+  }
+
   for (const id of PART_ORDER) {
     const m = partMetrics[id];
     if (!m.isLegal) {
@@ -1351,7 +1400,7 @@ export function runCFDSimulation(
     });
   }
 
-  if (partMetrics.floor.wakeExposurePct > 21 && floorBoardWakeScore < 0.014) {
+  if (parts.floor.enabled !== false && partMetrics.floor.wakeExposurePct > 21 && floorBoardWakeScore < 0.014) {
     diagnostics.push({
       id: 'fb_wake',
       severity: 'info',
@@ -1375,7 +1424,7 @@ export function runCFDSimulation(
     });
   }
 
-  if (sidepodInletAreaM2 < 0.075) {
+  if (parts.sidepods.enabled !== false && sidepodInletAreaM2 < 0.075) {
     diagnostics.push({
       id: 'sidepod_cooling',
       severity: 'warning',

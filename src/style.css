@@ -224,6 +224,35 @@ body,
   background: rgba(14, 116, 144, 0.24);
 }
 
+.part-card.part-disabled {
+  opacity: 0.56;
+  border-style: dashed;
+  background: rgba(15, 23, 42, 0.45);
+}
+
+.part-toggle-btn {
+  font-family: var(--font-mono);
+  font-size: 9px;
+  font-weight: 700;
+  padding: 1px 5px;
+  border-radius: 4px;
+  border: 1px solid var(--border-subtle);
+  cursor: pointer;
+  transition: all 0.12s ease;
+}
+
+.part-toggle-btn.on {
+  background: rgba(56, 189, 248, 0.16);
+  color: #38bdf8;
+  border-color: rgba(56, 189, 248, 0.35);
+}
+
+.part-toggle-btn.off {
+  background: rgba(239, 68, 68, 0.16);
+  color: #f87171;
+  border-color: rgba(239, 68, 68, 0.35);
+}
+
 .part-row-top {
   display: flex;
   align-items: center;
@@ -603,6 +632,9 @@ input[type='range'] {
 }
 .aero-table tr.clickable-row:hover {
   background: rgba(56, 189, 248, 0.1);
+}
+.aero-table tr.clickable-row.part-disabled-row {
+  opacity: 0.52;
 }
 
 /* Diagnostic Advisor Cards */
